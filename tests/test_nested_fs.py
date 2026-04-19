@@ -293,3 +293,109 @@ class TestNextedPathFileSystem(unittest.TestCase):
     #     :return:
     #     """
     #     pass
+
+    def test_get_filesystem_no_default_returns_none(self):
+        """Zonder default entry retourneert _get_filesystem (None, "", path) i.p.v. KeyError."""
+        mapping_no_default = {k: v for k, v in nested_mapping.items() if k != "default"}
+        fs = NestedFileSystem(mapping_no_default)
+
+        result = fs._get_filesystem("c/something/extra")
+        self.assertIsNone(result[0])
+        self.assertEqual("", result[1])
+        self.assertEqual("c/something/extra", result[2])
+
+    def test_cp_file_same_fs(self):
+        """cp_file binnen één sub-fs (regressietest voor 2-vs-3-tuple unpack bug)."""
+        fs = NestedFileSystem(nested_mapping)
+        with fs.open("a/source.txt", "w") as f:
+            f.write("hallo wereld")
+
+        # Voorheen crashte dit op `ValueError: too many values to unpack`
+        fs.cp_file("a/source.txt", "a/dest.txt")
+
+        self.assertTrue(fs.exists("a/dest.txt"))
+        self.assertEqual("hallo wereld", fs.read_text("a/dest.txt"))
+
+    def test_cp_file_cross_fs(self):
+        """cp_file tussen twee verschillende sub-fs'en."""
+        fs = NestedFileSystem(nested_mapping)
+        with fs.open("a/source.txt", "w") as f:
+            f.write("cross fs content")
+
+        fs.cp_file("a/source.txt", "b/dest.txt")
+
+        self.assertTrue(fs.exists("a/source.txt"))  # origineel intact
+        self.assertTrue(fs.exists("b/dest.txt"))
+        self.assertEqual("cross fs content", fs.read_text("b/dest.txt"))
+
+    def test_mv_same_fs(self):
+        """mv binnen één sub-fs."""
+        fs = NestedFileSystem(nested_mapping)
+        with fs.open("a/source.txt", "w") as f:
+            f.write("verplaatsen")
+
+        fs.mv("a/source.txt", "a/dest.txt")
+
+        self.assertFalse(fs.exists("a/source.txt"))
+        self.assertTrue(fs.exists("a/dest.txt"))
+        self.assertEqual("verplaatsen", fs.read_text("a/dest.txt"))
+
+    def test_mv_cross_fs(self):
+        """mv tussen twee verschillende sub-fs'en."""
+        fs = NestedFileSystem(nested_mapping)
+        with fs.open("a/source.txt", "w") as f:
+            f.write("cross fs mv")
+
+        fs.mv("a/source.txt", "b/dest.txt")
+
+        self.assertFalse(fs.exists("a/source.txt"))
+        self.assertTrue(fs.exists("b/dest.txt"))
+        self.assertEqual("cross fs mv", fs.read_text("b/dest.txt"))
+
+    def test_ls_sub_fs_uses_correct_root_path(self):
+        """ls() op een sub-fs prefixed names met de juiste root_path (Bug: gebruikte fs.root_path).
+
+        Voorheen verwees de code naar `fs.root_path` (bestond niet), waardoor
+        ls() crashte op AttributeError zodra je 'm op een sub-fs aanriep.
+        """
+        fs = NestedFileSystem(nested_mapping)
+        with fs.open("a/test1.txt", "w") as f:
+            f.write("x")
+        with fs.open("a/test2.txt", "w") as f:
+            f.write("y")
+
+        # Mag niet crashen
+        names = fs.ls("a", detail=False)
+        self.assertEqual(2, len(names))
+        # Beide entries krijgen een "a/" prefix
+        for name in names:
+            self.assertTrue(name.startswith("a/"), f"Expected 'a/' prefix, got: {name}")
+
+    def test_walk_top_level_doesnt_crash_without_maxdepth(self):
+        """walk() met maxdepth=None mag niet crashen op None - 1 (oude bug)."""
+        fs = NestedFileSystem(nested_mapping)
+        with fs.open("a/test.txt", "w") as f:
+            f.write("x")
+
+        # Mag niet TypeError op None - 1 geven
+        results = list(fs.walk(""))
+        self.assertGreater(len(results), 0)
+
+    def test_walk_specific_subfs(self):
+        """walk() op een specifieke sub-fs path."""
+        fs = NestedFileSystem(nested_mapping)
+        with fs.open("a/dir1/file1.txt", "w") as f:
+            f.write("x")
+        with fs.open("a/dir1/file2.txt", "w") as f:
+            f.write("y")
+
+        results = list(fs.walk("a"))
+        # Verzamel alle file paden
+        all_files = set()
+        for base, dirs, files in results:
+            for f in files:
+                full = f"{base}/{f}" if base else f
+                all_files.add(full)
+
+        self.assertIn("a/dir1/file1.txt", all_files)
+        self.assertIn("a/dir1/file2.txt", all_files)

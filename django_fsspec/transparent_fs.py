@@ -261,10 +261,11 @@ class TransparentFileSystem(AbstractFileSystem):
         return self.base_fs
 
     def lexists(self, path, *args, **kwargs):
-        fs, root_path, nested_path = self._get_filesystem(path)
-        if fs is None:
-            return False
-        return fs.lexists(nested_path, *args, **kwargs)
+        # Voorheen werd hier `self._get_filesystem(path)` aangeroepen, maar dat
+        # is een methode van NestedFileSystem — niet van TransparentFileSystem.
+        # Copy-paste error. Use `__leading_fs` net als de andere read-paden.
+        fs = self.__leading_fs(path)
+        return fs.lexists(path, *args, **kwargs)
 
     # def info(self, path, **kwargs): uses ls
 
