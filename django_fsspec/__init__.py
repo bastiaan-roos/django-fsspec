@@ -1,4 +1,4 @@
-__version__ = "0.0.1a2"
+__version__ = "0.1.0b1"
 
 from .fsspec_storage import FsspecStorage
 from .nested_fs import NestedFileSystem

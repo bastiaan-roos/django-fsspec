@@ -1,6 +1,5 @@
 from django.db import models
 
-
 app_label = "test_app"
 
 
@@ -12,4 +11,3 @@ class FieldTestModel(models.Model):
 
     def __str__(self):
         return self.file.name
-

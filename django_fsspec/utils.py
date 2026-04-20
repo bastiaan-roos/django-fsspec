@@ -89,9 +89,7 @@ def unwrap_s3_target(fs: AbstractFileSystem, path: str):
         error messages.
     """
     if S3FileSystem is None:
-        raise NotImplementedError(
-            "s3fs is not installed; install django-fsspec[s3] for S3 support"
-        )
+        raise NotImplementedError("s3fs is not installed; install django-fsspec[s3] for S3 support")
 
     if isinstance(fs, DirFileSystem):
         bucket = str(fs.path)
@@ -101,14 +99,11 @@ def unwrap_s3_target(fs: AbstractFileSystem, path: str):
         inner = fs
         bucket, _, key = path.partition("/")
         if not bucket or not key:
-            raise NotImplementedError(
-                f"Bare S3FileSystem requires 'bucket/key' path, got {path!r}"
-            )
+            raise NotImplementedError(f"Bare S3FileSystem requires 'bucket/key' path, got {path!r}")
 
     if not isinstance(inner, S3FileSystem):
         raise NotImplementedError(
-            f"Sub-filesystem is {type(inner).__name__}, not S3FileSystem; "
-            "signing and direct URLs require an S3 backend"
+            f"Sub-filesystem is {type(inner).__name__}, not S3FileSystem; signing and direct URLs require an S3 backend"
         )
     return inner, bucket, key
 
@@ -137,9 +132,7 @@ def make_boto3_client_from_s3fs(s3_fs):
         When boto3 is not installed — install django-fsspec[s3].
     """
     if boto3 is None:
-        raise NotImplementedError(
-            "boto3 is not installed; install django-fsspec[s3] for S3 support"
-        )
+        raise NotImplementedError("boto3 is not installed; install django-fsspec[s3] for S3 support")
 
     kwargs = {}
     if getattr(s3_fs, "key", None):
@@ -185,8 +178,6 @@ def build_virtual_hosted_url(s3_fs, bucket: str, key: str) -> str:
     client_kwargs = getattr(s3_fs, "client_kwargs", None) or {}
     endpoint_url = client_kwargs.get("endpoint_url") or getattr(s3_fs, "endpoint_url", None)
     if not endpoint_url:
-        raise NotImplementedError(
-            "S3FileSystem has no endpoint_url configured; cannot build direct URL"
-        )
+        raise NotImplementedError("S3FileSystem has no endpoint_url configured; cannot build direct URL")
     parsed = urlparse(endpoint_url)
     return f"{parsed.scheme}://{bucket}.{parsed.netloc}/{key.lstrip('/')}"

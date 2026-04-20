@@ -1,7 +1,7 @@
-from django.http import JsonResponse, FileResponse
+from django.http import FileResponse
+from django.http import JsonResponse
 from django.views.generic import View
-
-from tests.test_app.models import FieldTestModel
+from test_app.models import FieldTestModel
 
 
 class FileUploadView(View):
@@ -24,11 +24,16 @@ class FileUploadView(View):
         test_model = FieldTestModel()
         test_model.file.save(file_name, requested_file, save=True)
 
-        return JsonResponse({
-            "message": "File uploaded successfully.",
-            "id": test_model.id,
-            "file_path": test_model.file.path,
-        }, status=201)
+        return JsonResponse(
+            {
+                "message": "File uploaded successfully.",
+                "id": test_model.id,
+                # `.name` is the storage-relative path; `.path` would raise
+                # NotImplementedError on FsspecStorage for remote backends.
+                "file_name": test_model.file.name,
+            },
+            status=200,
+        )
 
     def get(self, pk, request, *args, **kwargs):
         """

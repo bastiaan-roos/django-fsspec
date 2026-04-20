@@ -80,9 +80,7 @@ class NestedFileSystem(AbstractFileSystem):
     def fsid(self):
         return self._fsid
 
-    def _get_filesystem(
-        self, path: "str | Path"
-    ) -> tuple["AbstractFileSystem | None", str, str]:
+    def _get_filesystem(self, path: "str | Path") -> tuple["AbstractFileSystem | None", str, str]:
         """Returns (filesystem, root_path, nested_path) for the given path.
 
         - `filesystem`: the sub-filesystem that handles this path, or `None`
@@ -173,9 +171,7 @@ class NestedFileSystem(AbstractFileSystem):
 
             # Append the contents of the default fs if one is configured.
             if "default" in self.file_systems:
-                out = list(out) + list(
-                    self.file_systems["default"].ls("", detail=detail, **kwargs)
-                )
+                out = list(out) + list(self.file_systems["default"].ls("", detail=detail, **kwargs))
             return out
 
         fs, root_path, nested_path = self._get_filesystem(path)
@@ -203,9 +199,7 @@ class NestedFileSystem(AbstractFileSystem):
             extra_prefixes = [k for k in self.file_systems.keys() if k != "default"]
 
             if "default" in self.file_systems:
-                for base_path, dirs, files in self.file_systems["default"].walk(
-                    "", maxdepth=maxdepth, **kwargs
-                ):
+                for base_path, dirs, files in self.file_systems["default"].walk("", maxdepth=maxdepth, **kwargs):
                     if base_path == "":
                         yield "", list(dirs) + extra_prefixes, files
                     else:
@@ -218,9 +212,7 @@ class NestedFileSystem(AbstractFileSystem):
             for root_path, fs in self.file_systems.items():
                 if root_path == "default":
                     continue
-                for base_path, dirs, files in fs.walk(
-                    "", maxdepth=sub_maxdepth, **kwargs
-                ):
+                for base_path, dirs, files in fs.walk("", maxdepth=sub_maxdepth, **kwargs):
                     full_base = f"{root_path}/{base_path}" if base_path else root_path
                     yield full_base, dirs, files
             return

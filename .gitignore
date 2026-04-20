@@ -5,6 +5,7 @@
 *.swp
 
 .tox/
+.pixi/
 build/
 __pycache__
 .coverage

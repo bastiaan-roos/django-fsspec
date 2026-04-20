@@ -173,6 +173,7 @@ class FsspecStorage(Storage):
                 # case. Return an alternative name so Django sees the
                 # correct value.
                 from django.core.files.storage import Storage as _StorageBase
+
                 base_name = _StorageBase.get_available_name(self, name, max_length=max_length)
                 return self._save(base_name, content, max_length=max_length)
 
@@ -206,10 +207,7 @@ class FsspecStorage(Storage):
         stored_checksum = self.filesystem.checksum(name)
         if stored_checksum != source_checksum:
             self.filesystem.rm(name)
-            raise IOError(
-                f"Checksum mismatch after upload of {name}: "
-                f"{stored_checksum!r} != {source_checksum!r}"
-            )
+            raise IOError(f"Checksum mismatch after upload of {name}: {stored_checksum!r} != {source_checksum!r}")
 
     def size(self, name):
         return self.filesystem.size(name)
@@ -294,7 +292,9 @@ class FsspecStorage(Storage):
             params.update(response_headers)
         operation = "get_object" if method == "GET" else "put_object"
         return boto_client.generate_presigned_url(
-            operation, Params=params, ExpiresIn=expires,
+            operation,
+            Params=params,
+            ExpiresIn=expires,
         )
 
     def _resolve_s3_target(self, name):

@@ -132,9 +132,7 @@ class TestNextedPathFileSystem(unittest.TestCase):
         with fs.open(test_file_root_fs_default_subdir, "w") as f:
             f.write(content)
 
-        path = Path(
-            root_fs_default, (Path(test_file_root_fs_default_subdir).relative_to(""))
-        )
+        path = Path(root_fs_default, (Path(test_file_root_fs_default_subdir).relative_to("")))
         self.assertTrue(path.exists())
         with open(path, "r") as f:
             self.assertEqual(f.read(), content)
@@ -257,20 +255,19 @@ class TestNextedPathFileSystem(unittest.TestCase):
             # tail
             self.assertEqual(bytes(content[-1024:], "utf-8"), fs.tail(file_path, 1024))
             # read_block
-            self.assertEqual(
-                bytes(content[4:9], "utf-8"), fs.read_block(file_path, 4, 5)
-            )
-            # created
+            self.assertEqual(bytes(content[4:9], "utf-8"), fs.read_block(file_path, 4, 5))
+            # created — 1 ms tolerance: the datetime round-trip through UTC
+            # loses sub-ms precision on some filesystems.
             self.assertAlmostEqual(
                 Path(abs_local_path).stat().st_ctime,
                 fs.created(file_path).timestamp(),
-                4,
+                places=3,
             )
-            # modified
+            # modified — same precision caveat as `created` above.
             self.assertAlmostEqual(
                 Path(abs_local_path).stat().st_mtime,
                 fs.modified(file_path).timestamp(),
-                4,
+                places=3,
             )
 
         # todo:

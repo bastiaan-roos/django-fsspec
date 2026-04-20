@@ -201,34 +201,42 @@ STORAGES = {
 
 ### Install for local development
 
-The simplest path is a virtualenv:
+The recommended workflow uses [pixi](https://pixi.sh) — it provisions the
+Python environment, installs the package editable with the `s3` extra,
+and exposes every common action as a named task:
 
 ```bash
 git clone https://github.com/bastiaan-roos/django-fsspec.git
 cd django-fsspec
+pixi install                              # provisions .pixi/envs/default
+```
+
+Prefer a plain virtualenv? That works too:
+
+```bash
 python -m venv venv
 source venv/bin/activate
-pip install -e ".[s3]"                                # core + S3
-pip install pytest pytest-cov pytest-django ruff build twine python-dotenv
+pip install -e ".[s3]"
+pip install pytest pytest-cov pytest-django ruff build twine python-dotenv tox
 ```
 
 ### Run the tests
 
-Fast path — one Python/Django combination, same interpreter as your venv:
+Single Python/Django combination (fast):
 
 ```bash
-pytest                                    # runs every test in tests/
-pytest tests/test_nested_fs.py -v         # a single file
-pytest -k presigned                       # by keyword
+pixi run tests                            # pytest --cov=django_fsspec
+pixi run tests-verbose                    # adds -v
+pixi run -- pytest tests/test_nested_fs.py -v
+pixi run -- pytest -k presigned
 ```
 
-Full matrix (every supported Python × Django combination) — uses `tox`:
+Full matrix (every supported Python × Django combination, via tox):
 
 ```bash
-pip install tox
-tox                                       # every env in tox.ini
-tox -e py3.12-django5.1                   # one env
-tox -e ruff                               # the lint-only env
+pixi run tox                              # every env in tox.ini
+pixi run -- tox -e py3.12-django5.1       # one env
+pixi run -- tox -e ruff                   # the lint-only env
 ```
 
 The S3 integration tests in `tests/test_with_s3.py` are skipped unless
@@ -247,8 +255,10 @@ S3_TEST_BUCKET_NAME2=...
 ### Style and lint
 
 ```bash
-ruff check django_fsspec/ tests/          # lint
-ruff format django_fsspec/ tests/         # auto-format (replaces black)
+pixi run style                            # sort_imports + fmt
+pixi run sort_imports                     # ruff check --select I --fix
+pixi run fmt                              # ruff format
+pixi run lint                             # ruff check ./django_fsspec
 ```
 
 CI runs the `ruff` tox env on every push.
@@ -256,10 +266,8 @@ CI runs the `ruff` tox env on every push.
 ### Build an installable artifact
 
 ```bash
-pip install build
-rm -rf dist/ build/ *.egg-info/
-python -m build                            # produces dist/*.whl and *.tar.gz
-python -m twine check dist/*               # validates metadata
+pixi run build                            # cleans dist/, builds wheel + sdist
+pixi run build-check                      # twine check dist/*
 ```
 
 ## Publishing to PyPI
@@ -276,9 +284,7 @@ One-time setup:
 Test the release on Test PyPI first:
 
 ```bash
-rm -rf dist/ build/ *.egg-info/
-python -m build
-python -m twine upload --repository testpypi dist/*
+pixi run publish-test
 # Username: __token__
 # Password: <your Test PyPI token>
 
@@ -292,7 +298,7 @@ python -c "from django_fsspec import FsspecStorage; print('ok')"
 Real release:
 
 ```bash
-python -m twine upload dist/*
+pixi run publish
 # Username: __token__
 # Password: <your PyPI token>
 ```
@@ -309,10 +315,10 @@ name availability, classifiers).
 
 ## Status
 
-Alpha (`0.0.1a2`). `FsspecStorage`, `NestedFileSystem`, and
+Beta (`0.1.0b1`). `FsspecStorage`, `NestedFileSystem`, and
 `TransparentFileSystem` are working for the commonly used read/write
 paths and are test-covered against a real S3-compatible backend.
-Presigned URLs (GET and PUT) and optional checksum verification are
-shipped as of `0.0.1a2`. Some edge cases in `walk`, `get`, and `put`
+Presigned URLs (GET and PUT) and optional checksum verification ship
+as of `0.1.0b1`. Some edge cases in `walk`, `get`, and `put`
 recursion are still marked with TODOs in the source; contributions
 welcome.

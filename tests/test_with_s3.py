@@ -4,7 +4,8 @@ import unittest
 from io import BytesIO
 from pathlib import Path
 from urllib.error import HTTPError
-from urllib.request import Request, urlopen
+from urllib.request import Request
+from urllib.request import urlopen
 
 import fsspec
 import s3fs  # noqa: F401
@@ -89,9 +90,7 @@ class TestWithS3(unittest.TestCase):
                 "relative_to_path": self.root_fs_default,
             },
         }
-        self.nested_fs = fsspec.filesystem(
-            "nested", path_storage_configs=self.nested_mapping
-        )
+        self.nested_fs = fsspec.filesystem("nested", path_storage_configs=self.nested_mapping)
 
         import boto3
 
@@ -167,28 +166,18 @@ class TestWithS3(unittest.TestCase):
         s3 = self.boto12
         response = s3.list_objects_v2(Bucket=_env("S3_TEST_BUCKET_NAME"))
         contents = response.get("Contents")
-        self.assertTrue(
-            [obj.get("Key") for obj in contents if "testa.txt" in obj.get("Key")]
-        )
+        self.assertTrue([obj.get("Key") for obj in contents if "testa.txt" in obj.get("Key")])
 
         response = s3.list_objects_v2(Bucket=_env("S3_TEST_BUCKET_NAME2"))
         contents = response.get("Contents")
-        self.assertTrue(
-            [obj.get("Key") for obj in contents if "testb.txt" in obj.get("Key")]
-        )
-        self.assertFalse(
-            [obj.get("Key") for obj in contents if "testa.txt" in obj.get("Key")]
-        )
+        self.assertTrue([obj.get("Key") for obj in contents if "testb.txt" in obj.get("Key")])
+        self.assertFalse([obj.get("Key") for obj in contents if "testa.txt" in obj.get("Key")])
 
         s3 = self.boto3
         response = s3.list_objects_v2(Bucket=_env("S3_TEST_BUCKET_NAME3"))
         contents = response.get("Contents")
-        self.assertTrue(
-            [obj.get("Key") for obj in contents if "testc.txt" in obj.get("Key")]
-        )
-        self.assertFalse(
-            [obj.get("Key") for obj in contents if "testa.txt" in obj.get("Key")]
-        )
+        self.assertTrue([obj.get("Key") for obj in contents if "testc.txt" in obj.get("Key")])
+        self.assertFalse([obj.get("Key") for obj in contents if "testa.txt" in obj.get("Key")])
 
         os.path.exists("testdef.txt")
         self.assertTrue(Path(self.root_fs_default, "testdef.txt").exists())
@@ -217,23 +206,14 @@ class TestWithS3(unittest.TestCase):
         s3 = self.boto12
         response = s3.list_objects_v2(Bucket=_env("S3_TEST_BUCKET_NAME"))
         contents = response.get("Contents")
-        self.assertFalse(
-            contents is not None
-            and [obj.get("Key") for obj in contents if "testa.txt" in obj.get("Key")]
-        )
+        self.assertFalse(contents is not None and [obj.get("Key") for obj in contents if "testa.txt" in obj.get("Key")])
         response = s3.list_objects_v2(Bucket=_env("S3_TEST_BUCKET_NAME2"))
         contents = response.get("Contents")
-        self.assertFalse(
-            contents is not None
-            and [obj.get("Key") for obj in contents if "testb.txt" in obj.get("Key")]
-        )
+        self.assertFalse(contents is not None and [obj.get("Key") for obj in contents if "testb.txt" in obj.get("Key")])
         s3 = self.boto3
         response = s3.list_objects_v2(Bucket=_env("S3_TEST_BUCKET_NAME3"))
         contents = response.get("Contents")
-        self.assertFalse(
-            contents is not None
-            and [obj.get("Key") for obj in contents if "testc.txt" in obj.get("Key")]
-        )
+        self.assertFalse(contents is not None and [obj.get("Key") for obj in contents if "testc.txt" in obj.get("Key")])
         self.assertFalse(Path(self.root_fs_default, "testdef.txt").exists())
 
 
@@ -297,9 +277,7 @@ class TestPresignedUrls(unittest.TestCase):
         """resolve_s3_target should unwrap DirFileSystem → S3FileSystem + bucket."""
         import s3fs as _s3fs
 
-        s3_fs, bucket, key = self.storage.filesystem.resolve_s3_target(
-            "video/foo.mp4"
-        )
+        s3_fs, bucket, key = self.storage.filesystem.resolve_s3_target("video/foo.mp4")
         self.assertIsInstance(s3_fs, _s3fs.S3FileSystem)
         self.assertEqual(bucket, _env("S3_TEST_BUCKET_NAME2"))
         self.assertEqual(key, "foo.mp4")

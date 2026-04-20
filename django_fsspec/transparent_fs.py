@@ -81,9 +81,7 @@ class TransparentFileSystem(AbstractFileSystem):
         elif isinstance(base_fs, AbstractFileSystem):
             self.base_fs = base_fs
         else:
-            raise ValueError(
-                "base_fs must be a fsspec filesystem object or a dictionary with fsspec configuration"
-            )
+            raise ValueError("base_fs must be a fsspec filesystem object or a dictionary with fsspec configuration")
 
     def _get_path_tree(self, path):
         split_path = path.split("/")
@@ -141,9 +139,7 @@ class TransparentFileSystem(AbstractFileSystem):
             if exist_ok:
                 return
             else:
-                raise FileExistsError(
-                    f"Cannot create directory {path} because it already exists"
-                )
+                raise FileExistsError(f"Cannot create directory {path} because it already exists")
         # if directory or one of the parent directories in the path is deleted, then:
         # - create the directory in the transparent_fs
         # - remove the deleted flag directory
@@ -181,10 +177,7 @@ class TransparentFileSystem(AbstractFileSystem):
             return self.transparent_fs.rmdir(path)
 
     def ls(self, path, detail=True, **kwargs):
-        out = {
-            item["name"]: item
-            for item in self.base_fs.ls(path, detail=detail, **kwargs)
-        }
+        out = {item["name"]: item for item in self.base_fs.ls(path, detail=detail, **kwargs)}
         for item in self.transparent_fs.ls(path, detail=detail, **kwargs):
             if item.endswith(".deleted"):
                 del out[item[:-8]]
@@ -205,14 +198,10 @@ class TransparentFileSystem(AbstractFileSystem):
         # make one big dictionary
         out = {
             base_path: {"dirs": dirs, "files": files}
-            for base_path, dirs, files in self.base_fs.walk(
-                "", maxdepth=maxdepth, **kwargs
-            )
+            for base_path, dirs, files in self.base_fs.walk("", maxdepth=maxdepth, **kwargs)
         }
         # first loop and delete all paths that are deleted or replaced
-        for base_path, dirs, files in self.transparent_fs.walk(
-            "", maxdepth=maxdepth, **kwargs
-        ):
+        for base_path, dirs, files in self.transparent_fs.walk("", maxdepth=maxdepth, **kwargs):
             replaced = False
             if base_path.endswith(".deleted"):
                 bp = base_path[:-8]

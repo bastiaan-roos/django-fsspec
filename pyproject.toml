@@ -16,7 +16,7 @@ license = { text = "BSD-3-Clause" }
 authors = [{ name = "Bastiaan Roos", email = "bastiaan.roos@roosgeo.nl" }]
 requires-python = ">=3.11"
 classifiers = [
-  "Development Status :: 2 - Pre-Alpha",
+  "Development Status :: 4 - Beta",
   "Environment :: Web Environment",
   "Framework :: Django",
   "Framework :: Django :: 5.0",
@@ -126,6 +126,10 @@ lint.ignore = [
   "B028",
   "B904",
   "PGH004",
+  # Intentionally destructure `(fs, root_path, nested_path)` even when
+  # `root_path` is unused in that method — the tuple shape is part of the
+  # `_get_filesystem` contract and readers depend on seeing all three names.
+  "RUF059",
 ]
 target-version = "py312"
 

@@ -1,16 +1,15 @@
 import os
 import shutil
-
 from pathlib import Path
 
 import django
+from django.conf import settings
 from django.core.files.base import ContentFile
 from django.core.files.storage import storages
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
-
-from django.test import TestCase, Client
-from django.conf import settings
+from django.test import Client
+from django.test import TestCase
 from django.urls import reverse
 
 test_data_dir = Path(Path(__file__).parent, "tmp")
@@ -21,7 +20,7 @@ settings.configure(
     INSTALLED_APPS=[
         "test_app",
     ],
-    ROOT_URLCONF="test_app.urls",
+    ROOT_URLCONF="urls",
     DATABASES={
         "default": {
             "ENGINE": "django.db.backends.sqlite3",
@@ -38,7 +37,7 @@ settings.configure(
                     "target_protocol": "local",
                     "target_options": {
                         "auto_mkdir": True,  # make directories if they do not exist
-                    }
+                    },
                 },
             },
         }
@@ -59,7 +58,6 @@ class TestFsspecStorage(TestCase):
         super().setUpClass()
         # Initialize Django
 
-
     def setUp(self):
         os.makedirs(test_data_dir, exist_ok=True)
         # os.makedirs(test_data_dir / "test", exist_ok=True)
@@ -70,7 +68,6 @@ class TestFsspecStorage(TestCase):
         shutil.rmtree(test_data_dir, ignore_errors=True)
 
     def test_functions_part_one(self):
-
         storage = storages["default"]
         with storage.open("test_file.txt", "wb") as f:
             f.write(b"test content")
@@ -78,7 +75,9 @@ class TestFsspecStorage(TestCase):
         self.assertTrue(storage.exists("test_file.txt"))
         self.assertEqual(storage.size("test_file.txt"), 12)
         self.assertEqual(storage.open("test_file.txt").read(), b"test content")
-        self.assertEqual([item.get('name') for item in storage.listdir("")], ["test_file.txt"])
+        dirs, files = storage.listdir("")
+        self.assertEqual(files, ["test_file.txt"])
+        self.assertEqual(dirs, [])
         # test with original functions
         file_path = test_data_dir / "test_file.txt"
         self.assertTrue(file_path.exists())
@@ -92,7 +91,7 @@ class TestFsspecStorage(TestCase):
         self.assertFalse(file_path.exists())
 
     def test_functions_part_two(self):
-        """ functions save and get_alternative_name """
+        """functions save and get_alternative_name"""
 
         storage = storages["default"]
         # test save
@@ -106,7 +105,6 @@ class TestFsspecStorage(TestCase):
         self.assertFalse(name == name2)
 
     def test_file_field(self):
-
         django.setup()
         from test_app.models import FieldTestModel
 
@@ -130,11 +128,7 @@ class TestFsspecStorage(TestCase):
         # get filecontent of file of 10MB
         file_content = b"test content" * 1000000
 
-        uploaded_file = SimpleUploadedFile(
-            "test.txt",
-            file_content,
-            content_type="text/plain"
-        )
+        uploaded_file = SimpleUploadedFile("test.txt", file_content, content_type="text/plain")
 
         data = {
             "name": "test_file.txt",
@@ -142,4 +136,3 @@ class TestFsspecStorage(TestCase):
         }
         response = client.post(url, data, format="multipart")
         self.assertEqual(response.status_code, 200)
-
