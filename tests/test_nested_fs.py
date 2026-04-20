@@ -132,9 +132,7 @@ class TestNextedPathFileSystem(unittest.TestCase):
         with fs.open(test_file_root_fs_default_subdir, "w") as f:
             f.write(content)
 
-        path = Path(
-            root_fs_default, (Path(test_file_root_fs_default_subdir).relative_to(""))
-        )
+        path = Path(root_fs_default, (Path(test_file_root_fs_default_subdir).relative_to("")))
         self.assertTrue(path.exists())
         with open(path, "r") as f:
             self.assertEqual(f.read(), content)
@@ -257,20 +255,19 @@ class TestNextedPathFileSystem(unittest.TestCase):
             # tail
             self.assertEqual(bytes(content[-1024:], "utf-8"), fs.tail(file_path, 1024))
             # read_block
-            self.assertEqual(
-                bytes(content[4:9], "utf-8"), fs.read_block(file_path, 4, 5)
-            )
-            # created
+            self.assertEqual(bytes(content[4:9], "utf-8"), fs.read_block(file_path, 4, 5))
+            # created — 1 ms tolerance: the datetime round-trip through UTC
+            # loses sub-ms precision on some filesystems.
             self.assertAlmostEqual(
                 Path(abs_local_path).stat().st_ctime,
                 fs.created(file_path).timestamp(),
-                4,
+                places=3,
             )
-            # modified
+            # modified — same precision caveat as `created` above.
             self.assertAlmostEqual(
                 Path(abs_local_path).stat().st_mtime,
                 fs.modified(file_path).timestamp(),
-                4,
+                places=3,
             )
 
         # todo:
@@ -293,3 +290,137 @@ class TestNextedPathFileSystem(unittest.TestCase):
     #     :return:
     #     """
     #     pass
+
+    def test_get_filesystem_no_default_returns_none(self):
+        """Zonder default entry retourneert _get_filesystem (None, "", path) i.p.v. KeyError."""
+        mapping_no_default = {k: v for k, v in nested_mapping.items() if k != "default"}
+        fs = NestedFileSystem(mapping_no_default)
+
+        result = fs._get_filesystem("c/something/extra")
+        self.assertIsNone(result[0])
+        self.assertEqual("", result[1])
+        self.assertEqual("c/something/extra", result[2])
+
+    def test_cp_file_same_fs(self):
+        """cp_file binnen één sub-fs (regressietest voor 2-vs-3-tuple unpack bug)."""
+        fs = NestedFileSystem(nested_mapping)
+        with fs.open("a/source.txt", "w") as f:
+            f.write("hallo wereld")
+
+        # Previously this crashed with `ValueError: too many values to unpack`.
+        fs.cp_file("a/source.txt", "a/dest.txt")
+
+        self.assertTrue(fs.exists("a/dest.txt"))
+        self.assertEqual("hallo wereld", fs.read_text("a/dest.txt"))
+
+    def test_cp_file_cross_fs(self):
+        """cp_file tussen twee verschillende sub-fs'en."""
+        fs = NestedFileSystem(nested_mapping)
+        with fs.open("a/source.txt", "w") as f:
+            f.write("cross fs content")
+
+        fs.cp_file("a/source.txt", "b/dest.txt")
+
+        self.assertTrue(fs.exists("a/source.txt"))  # origineel intact
+        self.assertTrue(fs.exists("b/dest.txt"))
+        self.assertEqual("cross fs content", fs.read_text("b/dest.txt"))
+
+    def test_mv_same_fs(self):
+        """mv binnen één sub-fs."""
+        fs = NestedFileSystem(nested_mapping)
+        with fs.open("a/source.txt", "w") as f:
+            f.write("verplaatsen")
+
+        fs.mv("a/source.txt", "a/dest.txt")
+
+        self.assertFalse(fs.exists("a/source.txt"))
+        self.assertTrue(fs.exists("a/dest.txt"))
+        self.assertEqual("verplaatsen", fs.read_text("a/dest.txt"))
+
+    def test_mv_cross_fs(self):
+        """mv tussen twee verschillende sub-fs'en."""
+        fs = NestedFileSystem(nested_mapping)
+        with fs.open("a/source.txt", "w") as f:
+            f.write("cross fs mv")
+
+        fs.mv("a/source.txt", "b/dest.txt")
+
+        self.assertFalse(fs.exists("a/source.txt"))
+        self.assertTrue(fs.exists("b/dest.txt"))
+        self.assertEqual("cross fs mv", fs.read_text("b/dest.txt"))
+
+    def test_ls_sub_fs_uses_correct_root_path(self):
+        """ls() on a sub-fs prefixes names with the right root_path (bug: used fs.root_path).
+
+        Previously the code referenced `fs.root_path` (which did not exist),
+        so ls() crashed with AttributeError the moment it was called on a
+        sub-fs.
+        """
+        fs = NestedFileSystem(nested_mapping)
+        with fs.open("a/test1.txt", "w") as f:
+            f.write("x")
+        with fs.open("a/test2.txt", "w") as f:
+            f.write("y")
+
+        # Must not crash.
+        names = fs.ls("a", detail=False)
+        self.assertEqual(2, len(names))
+        # Both entries get an "a/" prefix.
+        for name in names:
+            self.assertTrue(name.startswith("a/"), f"Expected 'a/' prefix, got: {name}")
+
+    def test_walk_top_level_doesnt_crash_without_maxdepth(self):
+        """walk() with maxdepth=None must not crash on None - 1 (old bug)."""
+        fs = NestedFileSystem(nested_mapping)
+        with fs.open("a/test.txt", "w") as f:
+            f.write("x")
+
+        # Must not raise TypeError on None - 1.
+        results = list(fs.walk(""))
+        self.assertGreater(len(results), 0)
+
+    def test_walk_specific_subfs(self):
+        """walk() on a specific sub-fs path."""
+        fs = NestedFileSystem(nested_mapping)
+        with fs.open("a/dir1/file1.txt", "w") as f:
+            f.write("x")
+        with fs.open("a/dir1/file2.txt", "w") as f:
+            f.write("y")
+
+        results = list(fs.walk("a"))
+        # Collect every file path.
+        all_files = set()
+        for base, _dirs, files in results:
+            for f in files:
+                full = f"{base}/{f}" if base else f
+                all_files.add(full)
+
+        self.assertIn("a/dir1/file1.txt", all_files)
+        self.assertIn("a/dir1/file2.txt", all_files)
+
+    def test_resolve_s3_target_raises_for_local_fs(self):
+        """resolve_s3_target on non-S3 sub-fs must raise NotImplementedError."""
+        fs = NestedFileSystem(nested_mapping)
+        # Prefix 'a' routes to the local DirFileSystem
+        with self.assertRaises(NotImplementedError) as ctx:
+            fs.resolve_s3_target("a/foo.txt")
+        self.assertIn("S3FileSystem", str(ctx.exception))
+
+    def test_resolve_s3_target_raises_for_default_local(self):
+        """Default local fallback must raise NotImplementedError too."""
+        fs = NestedFileSystem(nested_mapping)
+        with self.assertRaises(NotImplementedError):
+            fs.resolve_s3_target("foo.txt")
+
+    def test_resolve_s3_target_no_match_raises_filenotfound(self):
+        """Path with unknown prefix and no `default` must raise FileNotFoundError."""
+        mapping_no_default = {
+            "only_a": {
+                "protocol": "local",
+                "auto_mkdir": True,
+                "relative_to_path": root_fs1,
+            },
+        }
+        fs = NestedFileSystem(mapping_no_default)
+        with self.assertRaises(FileNotFoundError):
+            fs.resolve_s3_target("unknown/foo.txt")

@@ -6,28 +6,29 @@
 [build-system]
 build-backend = "setuptools.build_meta"
 requires = [
-  "setuptools>=61.2",
+  "setuptools>=77.0.0",
 ]
 
 [project]
 name = "django-fsspec"
 description = "Support for many storage backends in Django through fsspec"
-license = { text = "BSD-3-Clause" }
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
 authors = [{ name = "Bastiaan Roos", email = "bastiaan.roos@roosgeo.nl" }]
 requires-python = ">=3.11"
 classifiers = [
-  "Development Status :: 2 - Pre-Alpha",
+  "Development Status :: 4 - Beta",
   "Environment :: Web Environment",
   "Framework :: Django",
   "Framework :: Django :: 5.0",
   "Framework :: Django :: 5.1",
   "Intended Audience :: Developers",
-  "License :: OSI Approved :: BSD License",
   "Operating System :: OS Independent",
   "Programming Language :: Python",
   "Programming Language :: Python :: 3 :: Only",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
 ]
 dynamic = [
   "readme",
@@ -36,15 +37,19 @@ dynamic = [
 dependencies = [
   "Django>=5.0",
   "fsspec>=2025.2.0",
-  "s3fs>=2025.2.0"
 ]
+
 [project.optional-dependencies]
-#s3 = [
-#  "s3fs>=2025.2.0"
-#]
+s3 = [
+  "s3fs>=2025.2.0",
+  "boto3",
+]
 
 [project.urls]
-Homepage = "https://github.com/GetThePointGit/django-fsspec"
+Homepage = "https://github.com/bastiaan-roos/django-fsspec"
+Source = "https://github.com/bastiaan-roos/django-fsspec"
+Issues = "https://github.com/bastiaan-roos/django-fsspec/issues"
+Changelog = "https://github.com/bastiaan-roos/django-fsspec/blob/main/CHANGELOG.rst"
 
 [tool.setuptools]
 zip-safe = false
@@ -54,7 +59,7 @@ packages = [
 include-package-data = false
 
 [tool.setuptools.dynamic]
-readme = { file = ["README.md"] }
+readme = { file = ["README.md"], content-type = "text/markdown" }
 version = { attr = "django_fsspec.__version__" }
 
 [tool.ruff]
@@ -122,8 +127,19 @@ lint.ignore = [
   "B028",
   "B904",
   "PGH004",
+  # Intentionally destructure `(fs, root_path, nested_path)` even when
+  # `root_path` is unused in that method — the tuple shape is part of the
+  # `_get_filesystem` contract and readers depend on seeing all three names.
+  "RUF059",
 ]
 target-version = "py312"
+
+[tool.ruff.lint.per-file-ignores]
+# Tests legitimately do lazy imports (post-``django.setup()``, skip-guarded
+# S3 fixtures, model imports after settings.configure) and use loop-control
+# variables for readability even when unused. Scope those rule exceptions
+# to the test suite so production code stays strict.
+"tests/**" = ["PLC0415", "B007"]
 
 [tool.ruff.lint.isort]
 force-single-line = true

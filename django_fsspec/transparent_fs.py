@@ -6,6 +6,7 @@ from fsspec import AbstractFileSystem
 from fsspec import register_implementation
 
 from .utils import get_filesystem
+from .utils import unwrap_s3_target
 
 
 class ExistsReturn(object):
@@ -80,9 +81,7 @@ class TransparentFileSystem(AbstractFileSystem):
         elif isinstance(base_fs, AbstractFileSystem):
             self.base_fs = base_fs
         else:
-            raise ValueError(
-                "base_fs must be a fsspec filesystem object or a dictionary with fsspec configuration"
-            )
+            raise ValueError("base_fs must be a fsspec filesystem object or a dictionary with fsspec configuration")
 
     def _get_path_tree(self, path):
         split_path = path.split("/")
@@ -140,9 +139,7 @@ class TransparentFileSystem(AbstractFileSystem):
             if exist_ok:
                 return
             else:
-                raise FileExistsError(
-                    f"Cannot create directory {path} because it already exists"
-                )
+                raise FileExistsError(f"Cannot create directory {path} because it already exists")
         # if directory or one of the parent directories in the path is deleted, then:
         # - create the directory in the transparent_fs
         # - remove the deleted flag directory
@@ -180,10 +177,7 @@ class TransparentFileSystem(AbstractFileSystem):
             return self.transparent_fs.rmdir(path)
 
     def ls(self, path, detail=True, **kwargs):
-        out = {
-            item["name"]: item
-            for item in self.base_fs.ls(path, detail=detail, **kwargs)
-        }
+        out = {item["name"]: item for item in self.base_fs.ls(path, detail=detail, **kwargs)}
         for item in self.transparent_fs.ls(path, detail=detail, **kwargs):
             if item.endswith(".deleted"):
                 del out[item[:-8]]
@@ -204,14 +198,10 @@ class TransparentFileSystem(AbstractFileSystem):
         # make one big dictionary
         out = {
             base_path: {"dirs": dirs, "files": files}
-            for base_path, dirs, files in self.base_fs.walk(
-                "", maxdepth=maxdepth, **kwargs
-            )
+            for base_path, dirs, files in self.base_fs.walk("", maxdepth=maxdepth, **kwargs)
         }
         # first loop and delete all paths that are deleted or replaced
-        for base_path, dirs, files in self.transparent_fs.walk(
-            "", maxdepth=maxdepth, **kwargs
-        ):
+        for base_path, dirs, files in self.transparent_fs.walk("", maxdepth=maxdepth, **kwargs):
             replaced = False
             if base_path.endswith(".deleted"):
                 bp = base_path[:-8]
@@ -261,10 +251,11 @@ class TransparentFileSystem(AbstractFileSystem):
         return self.base_fs
 
     def lexists(self, path, *args, **kwargs):
-        fs, root_path, nested_path = self._get_filesystem(path)
-        if fs is None:
-            return False
-        return fs.lexists(nested_path, *args, **kwargs)
+        # Previously this called `self._get_filesystem(path)`, which is a
+        # method of NestedFileSystem — not of TransparentFileSystem
+        # (copy-paste error). Use `__leading_fs` like the other read paths.
+        fs = self.__leading_fs(path)
+        return fs.lexists(path, *args, **kwargs)
 
     # def info(self, path, **kwargs): uses ls
 
@@ -458,6 +449,35 @@ class TransparentFileSystem(AbstractFileSystem):
         fs = self.__leading_fs(path)
         return fs.modified(path)
 
+    def resolve_s3_target(self, path: str):
+        """Resolve `path` to the base filesystem's (S3FileSystem, bucket, key).
 
-# Registreer het bestandssysteem
+        Signing URLs against a transparent layer is meaningless (the
+        writeable overlay is typically local), so this always delegates to
+        `base_fs`. Callers that want signed URLs should hit the real
+        backend.
+
+        Parameters
+        ----------
+        path : str
+
+        Returns
+        -------
+        tuple of (s3fs.S3FileSystem, str, str)
+
+        Raises
+        ------
+        NotImplementedError
+            When `base_fs` is not backed by an `S3FileSystem`, or when it
+            is itself a composed filesystem without a
+            ``resolve_s3_target`` method.
+        """
+        base_fs = self.base_fs
+        resolver = getattr(base_fs, "resolve_s3_target", None)
+        if resolver is not None:
+            return resolver(path)
+        return unwrap_s3_target(base_fs, path)
+
+
+# Register the filesystem
 register_implementation("transparent", TransparentFileSystem)

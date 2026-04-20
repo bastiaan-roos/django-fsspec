@@ -1,83 +1,100 @@
+import posixpath
+
 from django.core.exceptions import ImproperlyConfigured
 from django.core.files.storage import Storage
+from django.core.files.storage import Storage as _StorageBase
+from django.utils.crypto import get_random_string
 
+from .utils import build_virtual_hosted_url
 from .utils import get_filesystem
+from .utils import make_boto3_client_from_s3fs
+from .utils import unwrap_s3_target
 
 
 class FsspecStorage(Storage):
-    """Django Storage implementation using fsspec
+    """Django Storage implementation using fsspec.
 
-    settings:
-    - fsspec
-      could be a fsspec filesystem object or a dictionary with fsspec configuration and fs_type for type of filesystem
+    Any filesystem that fsspec supports — local, S3, GCS, Azure, memory,
+    ftp, sftp, zip, ... — can be used as a Django storage backend. The two
+    composed filesystems shipped in this package (``NestedFileSystem``,
+    ``TransparentFileSystem``) plug straight into the same configuration.
 
-    example settings with nested filesystem:
-    STORAGES = {
-        "default": {
-            BACKEND: "django_fsspec.storage.FsspecStorage",
-            OPTIONS: {
-                "transparent_fs": {
-                    fs: "file",
-                    "path": "/path/to/files/transparent",
-                },
-                "underlying_fs": {
-                    "fs_type": "nested",
+    Example — single S3 bucket::
+
+        STORAGES = {
+            "default": {
+                "BACKEND": "django_fsspec.FsspecStorage",
+                "OPTIONS": {
+                    "base_url": "https://cdn.example.com/",
                     "storage_config": {
-                    "dir_a": {
-                        fs: "s3",
-                        "fsspec_config": {
-                            "endpoint_url": env.get("S3_TEST_ENDPOINT_URL"),
-                            "key": env.get("S3_TEST_ACCESS_KEY"),
-                            "secret": env.get("S3_TEST_SECRET_KEY"),
-                        },
-                        "relative_to_path": env.get("S3_TEST_BUCKET_NAME"),
+                        "protocol": "s3",
+                        "endpoint_url": "https://s3.eu-central-1.amazonaws.com",
+                        "key": S3_KEY,
+                        "secret": S3_SECRET,
+                        "relative_to_path": "my-bucket",
                     },
-                    "dir_b": {
-                        fs: "s3",
-                        "fsspec_config": {
-                            "endpoint_url": env.get("S3_TEST_ENDPOINT_URL"),
-                            "key": env.get("S3_TEST_ACCESS_KEY"),
-                            "secret": env.get("S3_TEST_SECRET_KEY"),
-                        },
-                        "relative_to_path": env.get("S3_TEST_BUCKET_NAME2"),
-                    },
-                    "default": {
-                        "fs": "file",
-                        "path": "/path/to/default/files",
-                    },
-                }
-            }
-        },
-        "staticfiles": {
-            "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+                },
+            },
         }
-    }
 
-    from django.core.files.storage import storages
+    Example — multi-bucket routing with ``NestedFileSystem``::
 
-    storage = storages["default"]
-    storage.exists("path/to/file")
-    storage.open("path/to/file")
+        STORAGES = {
+            "default": {
+                "BACKEND": "django_fsspec.FsspecStorage",
+                "OPTIONS": {
+                    "storage_config": {
+                        "protocol": "nested",
+                        "path_storage_configs": {
+                            "upload": {
+                                "protocol": "s3",
+                                "endpoint_url": S3_ENDPOINT,
+                                "key": S3_KEY, "secret": S3_SECRET,
+                                "relative_to_path": "myapp-upload",
+                            },
+                            "video": {
+                                "protocol": "s3",
+                                "endpoint_url": S3_ENDPOINT,
+                                "key": S3_KEY, "secret": S3_SECRET,
+                                "relative_to_path": "myapp-video",
+                            },
+                            "default": {
+                                "protocol": "file",
+                                "auto_mkdir": True,
+                            },
+                        },
+                    },
+                },
+            },
+        }
 
+    Usage::
+
+        from django.core.files.storage import storages
+        storage = storages["default"]
+        storage.save("upload/foo.ribx", content)
+        storage.exists("upload/foo.ribx")
+
+        # Presigned download URL (1 hour TTL)
+        url = storage.url_signed("upload/foo.ribx", expires=3600)
     """
 
     def __init__(self, **settings):
         settings_cp = settings.copy()
-        self.location = settings_cp.pop("location")
-        self.base_url = settings_cp.pop("base_url")
-        self.file_permissions_mode = settings_cp.pop("file_permissions_mode")
-        self.directory_permissions_mode = settings_cp.pop("directory_permissions_mode")
+        self.location = settings_cp.pop("location", "")
+        self.base_url = settings_cp.pop("base_url", None)
+        self.file_permissions_mode = settings_cp.pop("file_permissions_mode", None)
+        self.directory_permissions_mode = settings_cp.pop("directory_permissions_mode", None)
         self.allow_overwrite = settings_cp.pop("allow_overwrite", True)
+        # After a _save write, compare the stored checksum with
+        # `content.checksum` (if set). Mismatch → delete the object and
+        # raise IOError. Default off: costs an extra round-trip per save.
+        self.verify_checksum = settings_cp.pop("verify_checksum", False)
 
-        if "storage_config" not in settings:
+        if "storage_config" not in settings_cp:
             raise ImproperlyConfigured("storage_config is required")
-        settings_cp.pop("storage_mapping", None)
-        storage_config = settings.get("storage_config")
-        self.filesystem = get_filesystem(storage_config)
-
-        # extra (not implemented yet)
-        # self.allow_delete = settings.get('allow_delete', False)
-        # self.allow_write = settings.get('allow_write', False)
+        storage_config = settings_cp.pop("storage_config")
+        self.filesystem = get_filesystem(**storage_config)
 
         if settings_cp:
             raise ImproperlyConfigured(f"Unknown setting(s): {settings_cp.keys()}")
@@ -89,48 +106,221 @@ class FsspecStorage(Storage):
         return self.filesystem.exists(name)
 
     def listdir(self, path):
-        return self.filesystem.ls(path)
+        """Return ``(directories, files)`` tuple per Django's Storage contract.
+
+        Parameters
+        ----------
+        path : str
+
+        Returns
+        -------
+        tuple of (list of str, list of str)
+        """
+        details = self.filesystem.ls(path, detail=True)
+        dirs = []
+        files = []
+        for item in details:
+            # fsspec returns either dicts (detail=True) or strings (detail=False).
+            if isinstance(item, dict):
+                full_name = item.get("name", "")
+                kind = item.get("type", "file")
+            else:
+                full_name = item
+                kind = "file"
+            base_name = posixpath.basename(full_name.rstrip("/"))
+            if not base_name:
+                continue
+            if kind == "directory":
+                dirs.append(base_name)
+            else:
+                files.append(base_name)
+        return dirs, files
+
+    def ls(self, path):
+        """List a directory with details (extra — not part of Django's Storage API)."""
+        return self.filesystem.ls(path, detail=True)
 
     def _open(self, name, mode="rb"):
         return self.filesystem.open(name, mode)
 
     def path(self, name):
-        return name
+        # Django's contract: Storage.path() is only valid for local
+        # filesystem storages. For remote backends it must raise
+        # NotImplementedError so callers know explicitly that they cannot
+        # expect an absolute local path. Previously this returned `name`
+        # (the relative string), which led to silent footguns in code
+        # calling `os.path.isfile` or `open()` on the result.
+        raise NotImplementedError(
+            "FsspecStorage does not support absolute local file paths. "
+            "Use storage.open(name) or storage.url(name) instead."
+        )
 
     def _save(self, name, content, max_length=None):
-        if self.allow_overwrite and self.exists(name):
-            self.delete(name)
+        # Ensure the parent directory exists (relevant for the file://
+        # backend and nested filesystems that do not implicitly makedirs).
+        parent = posixpath.dirname(name)
+        if parent and hasattr(self.filesystem, "makedirs"):
+            try:
+                self.filesystem.makedirs(parent, exist_ok=True)
+            except (FileExistsError, NotImplementedError):
+                pass
+
+        if self.exists(name):
+            if self.allow_overwrite:
+                self.delete(name)
+            else:
+                # Do not overwrite; Django's Storage.save() normally calls
+                # get_available_name() before _save, so this is an edge
+                # case. Return an alternative name so Django sees the
+                # correct value.
+                base_name = _StorageBase.get_available_name(self, name, max_length=max_length)
+                return self._save(base_name, content, max_length=max_length)
+
+        # Streaming write: for UploadedFile we use chunks() to avoid
+        # loading the entire file into memory. For ContentFile / BytesIO
+        # we fall back to a single read().
         with self.filesystem.open(name, "wb") as f:
-            f.write(content.read())
+            if hasattr(content, "chunks"):
+                for chunk in content.chunks():
+                    f.write(chunk)
+            else:
+                # File-like without chunks(): copy in 4 MB blocks.
+                while True:
+                    block = content.read(4 * 1024 * 1024)
+                    if not block:
+                        break
+                    f.write(block)
+
+        if self.verify_checksum:
+            self._verify_checksum_after_save(name, content)
+
         return name
+
+    def _verify_checksum_after_save(self, name, content):
+        # The caller sets the source checksum on `content.checksum` (e.g.
+        # CRC-64NVME or MD5 of the source). Without a checksum on content
+        # we do nothing — opt-in per upload via the content object.
+        source_checksum = getattr(content, "checksum", None)
+        if source_checksum is None:
+            return
+        stored_checksum = self.filesystem.checksum(name)
+        if stored_checksum != source_checksum:
+            self.filesystem.rm(name)
+            raise IOError(f"Checksum mismatch after upload of {name}: {stored_checksum!r} != {source_checksum!r}")
 
     def size(self, name):
         return self.filesystem.size(name)
 
     def url(self, name):
-        return self.base_url + name
+        if not self.base_url:
+            raise ValueError(
+                "FsspecStorage instance has no base_url configured; "
+                "set it via OPTIONS['base_url'] in STORAGES if you need url() support."
+            )
+        return self.base_url.rstrip("/") + "/" + name.lstrip("/")
+
+    def url_direct(self, name):
+        """Return the public, un-signed URL for an object.
+
+        Parameters
+        ----------
+        name : str
+            Name within this storage (including any NestedFileSystem prefix).
+
+        Returns
+        -------
+        str
+            Virtual-hosted-style URL — ``{scheme}://{bucket}.{endpoint}/{key}``.
+            Only works when the bucket's ACL permits public read; otherwise
+            S3 returns 403.
+
+        Raises
+        ------
+        NotImplementedError
+            When the underlying backend is not S3-compatible, or has no
+            endpoint URL configured.
+        """
+        s3_fs, bucket, key = self._resolve_s3_target(name)
+        return build_virtual_hosted_url(s3_fs, bucket, key)
+
+    def url_signed(self, name, expires=3600, method="GET", response_headers=None):
+        """Generate a presigned URL for temporary access to an S3 object.
+
+        Parameters
+        ----------
+        name : str
+            Name within this storage (including any NestedFileSystem prefix).
+        expires : int, optional
+            TTL in seconds. Default 3600.
+        method : {'GET', 'PUT'}
+            'GET' grants download access, 'PUT' grants upload access.
+        response_headers : dict, optional
+            Response headers S3 should inject on download (only valid for
+            method='GET'), for instance
+            ``{'ResponseContentDisposition': 'attachment; filename=foo.mp4'}``.
+
+        Returns
+        -------
+        str
+            Presigned URL that expires after `expires` seconds.
+
+        Raises
+        ------
+        NotImplementedError
+            When the underlying backend is not S3-compatible.
+        ValueError
+            When `method` is not one of ``'GET'`` or ``'PUT'``, or when
+            `response_headers` is supplied together with ``method='PUT'``.
+        """
+        if method not in ("GET", "PUT"):
+            raise ValueError(f"method must be 'GET' or 'PUT', got {method!r}")
+        if method == "PUT" and response_headers:
+            raise ValueError("response_headers is only valid for method='GET'")
+
+        s3_fs, bucket, key = self._resolve_s3_target(name)
+
+        # Fast path: GET without custom response headers → s3fs can sign
+        # it itself (wraps sync + boto3 under the hood). Saves creating an
+        # extra sync client.
+        if method == "GET" and not response_headers:
+            return s3_fs.url(f"{bucket}/{key}", expires=expires)
+
+        boto_client = make_boto3_client_from_s3fs(s3_fs)
+        params = {"Bucket": bucket, "Key": key}
+        if response_headers:
+            params.update(response_headers)
+        operation = "get_object" if method == "GET" else "put_object"
+        return boto_client.generate_presigned_url(
+            operation,
+            Params=params,
+            ExpiresIn=expires,
+        )
+
+    def _resolve_s3_target(self, name):
+        """Resolve `name` via NestedFileSystem if present, else unwrap directly.
+
+        Parameters
+        ----------
+        name : str
+
+        Returns
+        -------
+        tuple of (s3fs.S3FileSystem, str, str)
+        """
+        resolver = getattr(self.filesystem, "resolve_s3_target", None)
+        if resolver is not None:
+            return resolver(name)
+        return unwrap_s3_target(self.filesystem, name)
 
     def get_accessed_time(self, name):
         raise NotImplementedError
 
     def get_alternative_name(self, file_root, file_ext):
-        # todo: implement
-        raise NotImplementedError
+        """Append a short random suffix before the extension (Django contract)."""
+        return "%s_%s%s" % (file_root, get_random_string(7), file_ext)
 
     def get_created_time(self, name):
         return self.filesystem.created(name)
 
     def get_modified_time(self, name):
         return self.filesystem.modified(name)
-
-    # optional:
-    # def get_accessed_time(self, name):
-    # def get_alternative_name(self,file_root, file_ext):
-    # def get_created_time(self, name):
-    # def get_modified_time(self, name):
-    # def get_valid_name(self, name):
-    # def generate_filename(self, filename):
-
-    # extra:
-    # def url_direct(self, name):
-    # def url_signed(self, name, expires=None):

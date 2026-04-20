@@ -5,6 +5,7 @@
 *.swp
 
 .tox/
+.pixi/
 build/
 __pycache__
 .coverage
@@ -13,8 +14,8 @@ __pycache__
 .idea/
 .vscode/
 .pytest_cache/
-venv/
-.venv/
+
+
 
 dist/
 docs/_build
@@ -22,3 +23,5 @@ docs/_build
 .DS_Store
 
 tests/.env
+
+TODO.md

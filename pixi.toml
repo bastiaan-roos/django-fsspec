@@ -1,0 +1,70 @@
+[project]
+name = "django-fsspec"
+channels = ["conda-forge"]
+platforms = ["linux-64", "linux-aarch64", "osx-arm64", "osx-64"]
+
+# -----------------------------------------------------------------------------
+# Tasks (pixi run <name>)
+# -----------------------------------------------------------------------------
+[tasks]
+# --- Testing ---
+tests = "pytest --cov=django_fsspec"
+tests-verbose = "pytest --cov=django_fsspec -v"
+# Run the full Python × Django matrix (requires tox)
+tox = "tox"
+
+# --- Styling / linting (matches drainworks conventions) ---
+# `style` auto-sorts imports and formats. `lint` only checks django_fsspec/
+# (tests get their own relaxed rules — see pyproject.toml).
+sort-imports = "ruff check ./django_fsspec ./tests --select I --fix --force-exclude"
+fmt = "ruff format ./django_fsspec ./tests --force-exclude"
+style = { depends-on = ["sort-imports", "fmt"] }
+lint = "ruff check ./django_fsspec"
+
+# --- Build / publish ---
+build-clean = { cmd = "rm -rf dist build *.egg-info django_fsspec.egg-info" }
+build = { cmd = "python -m build", depends-on = ["build-clean"] }
+build-check = { cmd = "python -m twine check dist/*", depends-on = ["build"] }
+publish-test = { cmd = "python -m twine upload --repository testpypi dist/*", depends-on = ["build-check"] }
+publish = { cmd = "python -m twine upload dist/*", depends-on = ["build-check"] }
+
+# --- Pre-commit hooks ---
+pre-commit-install = "pre-commit install --install-hooks"
+pre-commit-run = "pre-commit run --all-files"
+# Runs automatically after `pixi install` so contributors get the git
+# hook wired without an extra manual step.
+postinstall = { depends-on = ["pre-commit-install"] }
+
+# -----------------------------------------------------------------------------
+# Default dependencies (always installed)
+# -----------------------------------------------------------------------------
+[dependencies]
+python = ">=3.11,<3.14"
+pip = "*"
+
+[pypi-dependencies]
+# The package itself, editable install with the `s3` extra so imports work
+# straight from the checked-out source.
+django-fsspec = { path = ".", editable = true, extras = ["s3"] }
+
+# -----------------------------------------------------------------------------
+# Dev feature: testing + linting + build tools
+# -----------------------------------------------------------------------------
+[feature.dev.pypi-dependencies]
+pytest = "*"
+pytest-cov = "*"
+pytest-django = "*"
+ruff = "*"
+build = "*"
+twine = "*"
+setuptools = ">=77.0.0"
+python-dotenv = "*"
+tox = "*"
+pre-commit = "*"
+
+# -----------------------------------------------------------------------------
+# Environments
+# -----------------------------------------------------------------------------
+[environments]
+default = { features = ["dev"], solve-group = "default" }
+prod = { features = [], solve-group = "default" }
