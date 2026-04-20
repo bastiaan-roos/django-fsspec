@@ -1,11 +1,16 @@
 import json
-from pathlib import Path
+import os
+import tempfile
+from typing import TYPE_CHECKING
 
 from fsspec import AbstractFileSystem
 from fsspec import register_implementation
 
 from .utils import get_filesystem
 from .utils import unwrap_s3_target
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 class NestedFileSystem(AbstractFileSystem):
@@ -327,18 +332,14 @@ class NestedFileSystem(AbstractFileSystem):
         if fs1 is fs2:
             return fs1.cp_file(nested_path1, nested_path2, **kwargs)
         # Cross-filesystem copy: stream via a temporary local path.
-        import tempfile
-
         with tempfile.NamedTemporaryFile(delete=False) as tmp:
             tmp_path = tmp.name
         try:
             fs1.get_file(nested_path1, tmp_path)
             return fs2.put_file(tmp_path, nested_path2, **kwargs)
         finally:
-            import os as _os
-
             try:
-                _os.remove(tmp_path)
+                os.remove(tmp_path)
             except OSError:
                 pass
 

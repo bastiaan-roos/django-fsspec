@@ -296,7 +296,7 @@ class TestPresignedUrls(unittest.TestCase):
         url = self.storage.url_signed(name, expires=60)
         self.assertIn("Signature=", url)
 
-        with urlopen(url) as resp:  # noqa: S310 — presigned, trusted
+        with urlopen(url) as resp:
             self.assertEqual(resp.status, 200)
             self.assertEqual(resp.read(), payload)
 
@@ -313,7 +313,7 @@ class TestPresignedUrls(unittest.TestCase):
                 "ResponseContentType": "application/x-drainworks-test",
             },
         )
-        with urlopen(url) as resp:  # noqa: S310
+        with urlopen(url) as resp:
             self.assertEqual(resp.status, 200)
             disp = resp.headers.get("Content-Disposition", "")
             self.assertIn("custom.bin", disp)
@@ -328,8 +328,8 @@ class TestPresignedUrls(unittest.TestCase):
         payload = b"uploaded via presigned PUT"
 
         url = self.storage.url_signed(name, expires=60, method="PUT")
-        req = Request(url, data=payload, method="PUT")  # noqa: S310
-        with urlopen(req) as resp:  # noqa: S310
+        req = Request(url, data=payload, method="PUT")
+        with urlopen(req) as resp:
             self.assertIn(resp.status, (200, 204))
 
         # Register for teardown regardless of assertion outcome below.
@@ -358,7 +358,7 @@ class TestPresignedUrls(unittest.TestCase):
         url = self.storage.url_signed(name, expires=2)
         time.sleep(3)
         with self.assertRaises(HTTPError) as ctx:
-            urlopen(url)  # noqa: S310
+            urlopen(url)
         self.assertEqual(ctx.exception.code, 403)
 
 

@@ -390,7 +390,7 @@ class TestNextedPathFileSystem(unittest.TestCase):
         results = list(fs.walk("a"))
         # Collect every file path.
         all_files = set()
-        for base, dirs, files in results:
+        for base, _dirs, files in results:
             for f in files:
                 full = f"{base}/{f}" if base else f
                 all_files.add(full)

@@ -2,6 +2,7 @@ import posixpath
 
 from django.core.exceptions import ImproperlyConfigured
 from django.core.files.storage import Storage
+from django.core.files.storage import Storage as _StorageBase
 from django.utils.crypto import get_random_string
 
 from .utils import build_virtual_hosted_url
@@ -172,8 +173,6 @@ class FsspecStorage(Storage):
                 # get_available_name() before _save, so this is an edge
                 # case. Return an alternative name so Django sees the
                 # correct value.
-                from django.core.files.storage import Storage as _StorageBase
-
                 base_name = _StorageBase.get_available_name(self, name, max_length=max_length)
                 return self._save(base_name, content, max_length=max_length)
 

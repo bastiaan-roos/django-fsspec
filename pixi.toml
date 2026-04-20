@@ -28,6 +28,13 @@ build-check = { cmd = "python -m twine check dist/*", depends-on = ["build"] }
 publish-test = { cmd = "python -m twine upload --repository testpypi dist/*", depends-on = ["build-check"] }
 publish = { cmd = "python -m twine upload dist/*", depends-on = ["build-check"] }
 
+# --- Pre-commit hooks ---
+pre-commit-install = "pre-commit install --install-hooks"
+pre-commit-run = "pre-commit run --all-files"
+# Runs automatically after `pixi install` so contributors get the git
+# hook wired without an extra manual step.
+postinstall = { depends-on = ["pre-commit-install"] }
+
 # -----------------------------------------------------------------------------
 # Default dependencies (always installed)
 # -----------------------------------------------------------------------------
@@ -50,9 +57,10 @@ pytest-django = "*"
 ruff = "*"
 build = "*"
 twine = "*"
-setuptools = ">=61.2"
+setuptools = ">=77.0.0"
 python-dotenv = "*"
 tox = "*"
+pre-commit = "*"
 
 # -----------------------------------------------------------------------------
 # Environments

@@ -209,6 +209,7 @@ and exposes every common action as a named task:
 git clone https://github.com/bastiaan-roos/django-fsspec.git
 cd django-fsspec
 pixi install                              # provisions .pixi/envs/default
+                                          # and installs the pre-commit git hook
 ```
 
 Prefer a plain virtualenv? That works too:
@@ -262,6 +263,22 @@ pixi run lint                             # ruff check ./django_fsspec
 ```
 
 CI runs the `ruff` tox env on every push.
+
+### Pre-commit hooks
+
+A `.pre-commit-config.yaml` runs ruff (check + format), trailing-
+whitespace, end-of-file, YAML/TOML validity and a large-file guard on
+every commit. `pixi install` auto-wires the git hook via a
+`postinstall` task; to run the full sweep manually:
+
+```bash
+pixi run pre-commit-run                   # run every hook on every file
+pixi run pre-commit-install               # re-install the git hook
+```
+
+The hook runs inside the pre-commit-managed environment (not the pixi
+env), so the ruff version is pinned via the `rev` in
+`.pre-commit-config.yaml` — bump it with `pixi run -- pre-commit autoupdate`.
 
 ### Build an installable artifact
 

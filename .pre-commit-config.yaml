@@ -1,0 +1,32 @@
+# pre-commit hooks for django-fsspec.
+#
+# One-time setup for a fresh checkout:
+#
+#     pixi run pre-commit-install     # wires the git hook
+#
+# Run everything manually against the whole tree:
+#
+#     pixi run pre-commit-run
+#
+# See https://pre-commit.com for details.
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=500"]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.11
+    hooks:
+      # Lint + auto-fix where possible (import sorting, simple refactors).
+      - id: ruff
+        args: ["--fix"]
+      # Format all tracked Python files.
+      - id: ruff-format
