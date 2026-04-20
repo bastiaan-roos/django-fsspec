@@ -256,8 +256,8 @@ S3_TEST_BUCKET_NAME2=...
 ### Style and lint
 
 ```bash
-pixi run style                            # sort_imports + fmt
-pixi run sort_imports                     # ruff check --select I --fix
+pixi run style                            # sort-imports + fmt
+pixi run sort-imports                     # ruff check --select I --fix
 pixi run fmt                              # ruff format
 pixi run lint                             # ruff check ./django_fsspec
 ```

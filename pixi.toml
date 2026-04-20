@@ -16,9 +16,9 @@ tox = "tox"
 # --- Styling / linting (matches drainworks conventions) ---
 # `style` auto-sorts imports and formats. `lint` only checks django_fsspec/
 # (tests get their own relaxed rules — see pyproject.toml).
-sort_imports = "ruff check ./django_fsspec ./tests --select I --fix --force-exclude"
+sort-imports = "ruff check ./django_fsspec ./tests --select I --fix --force-exclude"
 fmt = "ruff format ./django_fsspec ./tests --force-exclude"
-style = { depends-on = ["sort_imports", "fmt"] }
+style = { depends-on = ["sort-imports", "fmt"] }
 lint = "ruff check ./django_fsspec"
 
 # --- Build / publish ---
