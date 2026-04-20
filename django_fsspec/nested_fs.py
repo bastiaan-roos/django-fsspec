@@ -85,16 +85,17 @@ class NestedFileSystem(AbstractFileSystem):
     ) -> tuple["AbstractFileSystem | None", str, str]:
         """Returns (filesystem, root_path, nested_path) for the given path.
 
-        - `filesystem`: het sub-fs dat dit pad afhandelt, of `None` als er geen
-          match is en geen `default` is geconfigureerd.
-        - `root_path`: de prefix die match (bv. `"a"` voor `"a/foo"`), of `""`
-          als de default fs gebruikt wordt.
-        - `nested_path`: het pad relatief aan de gekozen fs.
+        - `filesystem`: the sub-filesystem that handles this path, or `None`
+          when there is no match and no `default` is configured.
+        - `root_path`: the matching prefix (e.g. `"a"` for `"a/foo"`), or
+          `""` when the default fs is used.
+        - `nested_path`: the path relative to the chosen sub-filesystem.
         """
         path_str = str(path)
         parts = path_str.split("/", 1)
         if len(parts) == 1:
-            # Eén segment: kijk eerst of het zelf een prefix is (bv. "a" → fs["a"])
+            # Single segment: first check whether it is itself a prefix
+            # (e.g. "a" → fs["a"]).
             if path_str in self.file_systems:
                 return self.file_systems[path_str], path_str, ""
             root_path = None
@@ -104,7 +105,7 @@ class NestedFileSystem(AbstractFileSystem):
             if root_path in self.file_systems:
                 return self.file_systems[root_path], root_path, nested_path
 
-        # Geen prefix-match: val terug op default als die geconfigureerd is
+        # No prefix match: fall back to the default fs if configured.
         if "default" in self.file_systems:
             return self.file_systems["default"], "", path_str
         return None, "", path_str
@@ -160,7 +161,7 @@ class NestedFileSystem(AbstractFileSystem):
 
     def ls(self, path, detail=True, **kwargs):
         if path == "":
-            # Top-level: lijst alle prefixes (behalve "default") als directories
+            # Top-level: list every prefix (except "default") as a directory.
             if detail:
                 out = [
                     {"name": rpath, "size": None, "type": "directory"}
@@ -170,7 +171,7 @@ class NestedFileSystem(AbstractFileSystem):
             else:
                 out = [k for k in self.file_systems.keys() if k != "default"]
 
-            # Voeg de inhoud van de default fs toe als die er is
+            # Append the contents of the default fs if one is configured.
             if "default" in self.file_systems:
                 out = list(out) + list(
                     self.file_systems["default"].ls("", detail=detail, **kwargs)
@@ -183,11 +184,11 @@ class NestedFileSystem(AbstractFileSystem):
 
         out = fs.ls(nested_path, detail=detail, **kwargs)
 
-        # Prefix de names met root_path zodat callers consistente paden zien
+        # Prefix the names with root_path so callers see consistent paths.
         prefix = f"{root_path}/" if root_path else ""
         if detail:
             for item in out:
-                # `item["name"]` is relatief aan de sub-fs; herstel het volledige pad
+                # `item["name"]` is relative to the sub-fs; restore the full path.
                 item_name = item.get("name", "")
                 item["name"] = f"{prefix}{item_name}"
         else:
@@ -195,9 +196,10 @@ class NestedFileSystem(AbstractFileSystem):
         return out
 
     def walk(self, path, maxdepth=None, **kwargs):
-        """Walk over alle paths. Voor `path=""` itereert het over alle sub-fs'en."""
+        """Walk over all paths. For `path=""` iterates over every sub-fs."""
         if path == "":
-            # Top-level: yield de prefixes als directories naast wat default oplevert
+            # Top-level: yield the prefixes as directories alongside whatever
+            # the default fs produces.
             extra_prefixes = [k for k in self.file_systems.keys() if k != "default"]
 
             if "default" in self.file_systems:
@@ -211,7 +213,7 @@ class NestedFileSystem(AbstractFileSystem):
             else:
                 yield "", extra_prefixes, []
 
-            # Daarna walk per sub-fs (met aangepaste depth zodat de root-laag meetelt)
+            # Then walk per sub-fs (with adjusted depth so the root layer counts).
             sub_maxdepth = None if maxdepth is None else max(0, maxdepth - 1)
             for root_path, fs in self.file_systems.items():
                 if root_path == "default":
@@ -223,7 +225,7 @@ class NestedFileSystem(AbstractFileSystem):
                     yield full_base, dirs, files
             return
 
-        # Niet-root: walk op de specifieke sub-fs
+        # Non-root: walk on the specific sub-fs.
         fs, root_path, nested_path = self._get_filesystem(path)
         if fs is None:
             return
@@ -332,7 +334,7 @@ class NestedFileSystem(AbstractFileSystem):
             raise FileNotFoundError(f"No backend filesystem for {path1} or {path2}")
         if fs1 is fs2:
             return fs1.cp_file(nested_path1, nested_path2, **kwargs)
-        # Cross-filesystem copy: stream via een tijdelijk lokaal pad
+        # Cross-filesystem copy: stream via a temporary local path.
         import tempfile
 
         with tempfile.NamedTemporaryFile(delete=False) as tmp:
@@ -414,5 +416,5 @@ class NestedFileSystem(AbstractFileSystem):
         return fs.modified(nested_path, *args, **kwargs)
 
 
-# Registreer het bestandssysteem
+# Register the filesystem
 register_implementation("nested", NestedFileSystem)

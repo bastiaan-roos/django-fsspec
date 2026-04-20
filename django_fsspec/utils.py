@@ -2,11 +2,16 @@ import typing
 from pathlib import Path
 from urllib.parse import urlparse
 
-import boto3
 import fsspec
-from botocore.config import Config
 from fsspec import AbstractFileSystem
 from fsspec.implementations.dirfs import DirFileSystem
+
+try:
+    import boto3
+    from botocore.config import Config
+except ImportError:  # pragma: no cover — boto3 is an explicit install extra
+    boto3 = None
+    Config = None
 
 try:
     from s3fs import S3FileSystem
@@ -125,7 +130,17 @@ def make_boto3_client_from_s3fs(s3_fs):
     botocore.client.S3
         Synchronous boto3 S3 client configured with the same credentials
         and endpoint as `s3_fs`.
+
+    Raises
+    ------
+    NotImplementedError
+        When boto3 is not installed — install django-fsspec[s3].
     """
+    if boto3 is None:
+        raise NotImplementedError(
+            "boto3 is not installed; install django-fsspec[s3] for S3 support"
+        )
+
     kwargs = {}
     if getattr(s3_fs, "key", None):
         kwargs["aws_access_key_id"] = s3_fs.key

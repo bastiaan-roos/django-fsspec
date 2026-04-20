@@ -85,9 +85,9 @@ class FsspecStorage(Storage):
         self.file_permissions_mode = settings_cp.pop("file_permissions_mode", None)
         self.directory_permissions_mode = settings_cp.pop("directory_permissions_mode", None)
         self.allow_overwrite = settings_cp.pop("allow_overwrite", True)
-        # Na een _save-write de opgeslagen checksum vergelijken met
-        # `content.checksum` (indien gezet). Mismatch → object weer verwijderen
-        # en IOError raisen. Default uit: kost een extra round-trip per save.
+        # After a _save write, compare the stored checksum with
+        # `content.checksum` (if set). Mismatch → delete the object and
+        # raise IOError. Default off: costs an extra round-trip per save.
         self.verify_checksum = settings_cp.pop("verify_checksum", False)
 
         if "storage_config" not in settings_cp:
@@ -119,7 +119,7 @@ class FsspecStorage(Storage):
         dirs = []
         files = []
         for item in details:
-            # fsspec geeft ofwel dicts (detail=True) ofwel strings (detail=False)
+            # fsspec returns either dicts (detail=True) or strings (detail=False).
             if isinstance(item, dict):
                 full_name = item.get("name", "")
                 kind = item.get("type", "file")
@@ -143,20 +143,20 @@ class FsspecStorage(Storage):
         return self.filesystem.open(name, mode)
 
     def path(self, name):
-        # Django's contract: Storage.path() is alleen geldig voor lokale
-        # filesystem-storages. Voor remote backends moet het NotImplementedError
-        # raisen, zodat callers expliciet weten dat ze geen absoluut local pad
-        # kunnen verwachten. Voorheen retourneerde dit `name` (de relatieve
-        # string), wat tot silent footguns leidde in code die `os.path.isfile`
-        # of `open()` op de uitkomst aanriep.
+        # Django's contract: Storage.path() is only valid for local
+        # filesystem storages. For remote backends it must raise
+        # NotImplementedError so callers know explicitly that they cannot
+        # expect an absolute local path. Previously this returned `name`
+        # (the relative string), which led to silent footguns in code
+        # calling `os.path.isfile` or `open()` on the result.
         raise NotImplementedError(
             "FsspecStorage does not support absolute local file paths. "
             "Use storage.open(name) or storage.url(name) instead."
         )
 
     def _save(self, name, content, max_length=None):
-        # Zorg dat parent directory bestaat (relevant voor file:// backend en
-        # geneste filesystems die geen impliciete makedirs doen).
+        # Ensure the parent directory exists (relevant for the file://
+        # backend and nested filesystems that do not implicitly makedirs).
         parent = posixpath.dirname(name)
         if parent and hasattr(self.filesystem, "makedirs"):
             try:
@@ -168,23 +168,23 @@ class FsspecStorage(Storage):
             if self.allow_overwrite:
                 self.delete(name)
             else:
-                # Niet overschrijven; Django's Storage.save() roept normaal
-                # get_available_name() vóór _save aan, dus dit is een edge
-                # case. We retourneren een alternatieve naam zodat Django de
-                # juiste waarde krijgt te zien.
+                # Do not overwrite; Django's Storage.save() normally calls
+                # get_available_name() before _save, so this is an edge
+                # case. Return an alternative name so Django sees the
+                # correct value.
                 from django.core.files.storage import Storage as _StorageBase
                 base_name = _StorageBase.get_available_name(self, name, max_length=max_length)
                 return self._save(base_name, content, max_length=max_length)
 
-        # Streaming write: voor UploadedFile gebruiken we chunks() om niet de
-        # hele file in memory te laden. Voor ContentFile / BytesIO valt het
-        # terug op een enkele read().
+        # Streaming write: for UploadedFile we use chunks() to avoid
+        # loading the entire file into memory. For ContentFile / BytesIO
+        # we fall back to a single read().
         with self.filesystem.open(name, "wb") as f:
             if hasattr(content, "chunks"):
                 for chunk in content.chunks():
                     f.write(chunk)
             else:
-                # File-like zonder chunks(): kopieer in blokken van 4 MB
+                # File-like without chunks(): copy in 4 MB blocks.
                 while True:
                     block = content.read(4 * 1024 * 1024)
                     if not block:
@@ -197,9 +197,9 @@ class FsspecStorage(Storage):
         return name
 
     def _verify_checksum_after_save(self, name, content):
-        # Caller zet source-checksum op `content.checksum` (bv. CRC-64NVME of
-        # MD5 van de bron). Zonder checksum op content doen we niets — opt-in
-        # per upload via het content-object.
+        # The caller sets the source checksum on `content.checksum` (e.g.
+        # CRC-64NVME or MD5 of the source). Without a checksum on content
+        # we do nothing — opt-in per upload via the content object.
         source_checksum = getattr(content, "checksum", None)
         if source_checksum is None:
             return
@@ -282,9 +282,9 @@ class FsspecStorage(Storage):
 
         s3_fs, bucket, key = self._resolve_s3_target(name)
 
-        # Fast path: GET zonder custom response-headers → s3fs kan het zelf
-        # tekenen (wrap rond sync + boto3 onder water). Scheelt het aanmaken
-        # van een extra sync client.
+        # Fast path: GET without custom response headers → s3fs can sign
+        # it itself (wraps sync + boto3 under the hood). Saves creating an
+        # extra sync client.
         if method == "GET" and not response_headers:
             return s3_fs.url(f"{bucket}/{key}", expires=expires)
 

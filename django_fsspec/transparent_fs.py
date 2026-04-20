@@ -262,9 +262,9 @@ class TransparentFileSystem(AbstractFileSystem):
         return self.base_fs
 
     def lexists(self, path, *args, **kwargs):
-        # Voorheen werd hier `self._get_filesystem(path)` aangeroepen, maar dat
-        # is een methode van NestedFileSystem — niet van TransparentFileSystem.
-        # Copy-paste error. Use `__leading_fs` net als de andere read-paden.
+        # Previously this called `self._get_filesystem(path)`, which is a
+        # method of NestedFileSystem — not of TransparentFileSystem
+        # (copy-paste error). Use `__leading_fs` like the other read paths.
         fs = self.__leading_fs(path)
         return fs.lexists(path, *args, **kwargs)
 
@@ -490,5 +490,5 @@ class TransparentFileSystem(AbstractFileSystem):
         return unwrap_s3_target(base_fs, path)
 
 
-# Registreer het bestandssysteem
+# Register the filesystem
 register_implementation("transparent", TransparentFileSystem)

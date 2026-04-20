@@ -15,7 +15,7 @@ root_transparent_fs = Path(test_data_dir, "root_transparent_fs")
 
 class TestTransparentFS(unittest.TestCase):
     def setUp(self):
-        # Zorg dat de test directories bestaan zodat de DirFileSystem ze accepteert
+        # Ensure the test directories exist so DirFileSystem accepts them.
         root_base_fs.mkdir(parents=True, exist_ok=True)
         root_transparent_fs.mkdir(parents=True, exist_ok=True)
         self.fs = TransparentFileSystem(
@@ -44,14 +44,15 @@ class TestTransparentFS(unittest.TestCase):
         self.assertEqual("dir", transparent_fs.protocol)
 
     def test_lexists_does_not_crash(self):
-        """Regressie: lexists() riep voorheen `self._get_filesystem(path)` aan,
-        wat een NestedFileSystem methode is die niet op TransparentFileSystem
-        bestaat. Dat was een copy-paste bug die meteen crashte op AttributeError.
+        """Regression: lexists() previously called `self._get_filesystem(path)`,
+        which is a NestedFileSystem method that does not exist on
+        TransparentFileSystem. That copy-paste bug crashed on AttributeError
+        the moment lexists() was called.
         """
-        # Voor een non-existing path: moet False retourneren, niet crashen
+        # For a non-existing path: must return False, not crash.
         self.assertFalse(self.fs.lexists("does/not/exist.txt"))
 
-        # Schrijf een file en verifieer dat lexists() True retourneert
+        # Write a file and verify that lexists() returns True.
         with self.fs.open("present.txt", "w") as f:
             f.write("hi")
         self.assertTrue(self.fs.lexists("present.txt"))

@@ -310,7 +310,7 @@ class TestNextedPathFileSystem(unittest.TestCase):
         with fs.open("a/source.txt", "w") as f:
             f.write("hallo wereld")
 
-        # Voorheen crashte dit op `ValueError: too many values to unpack`
+        # Previously this crashed with `ValueError: too many values to unpack`.
         fs.cp_file("a/source.txt", "a/dest.txt")
 
         self.assertTrue(fs.exists("a/dest.txt"))
@@ -353,10 +353,11 @@ class TestNextedPathFileSystem(unittest.TestCase):
         self.assertEqual("cross fs mv", fs.read_text("b/dest.txt"))
 
     def test_ls_sub_fs_uses_correct_root_path(self):
-        """ls() op een sub-fs prefixed names met de juiste root_path (Bug: gebruikte fs.root_path).
+        """ls() on a sub-fs prefixes names with the right root_path (bug: used fs.root_path).
 
-        Voorheen verwees de code naar `fs.root_path` (bestond niet), waardoor
-        ls() crashte op AttributeError zodra je 'm op een sub-fs aanriep.
+        Previously the code referenced `fs.root_path` (which did not exist),
+        so ls() crashed with AttributeError the moment it was called on a
+        sub-fs.
         """
         fs = NestedFileSystem(nested_mapping)
         with fs.open("a/test1.txt", "w") as f:
@@ -364,25 +365,25 @@ class TestNextedPathFileSystem(unittest.TestCase):
         with fs.open("a/test2.txt", "w") as f:
             f.write("y")
 
-        # Mag niet crashen
+        # Must not crash.
         names = fs.ls("a", detail=False)
         self.assertEqual(2, len(names))
-        # Beide entries krijgen een "a/" prefix
+        # Both entries get an "a/" prefix.
         for name in names:
             self.assertTrue(name.startswith("a/"), f"Expected 'a/' prefix, got: {name}")
 
     def test_walk_top_level_doesnt_crash_without_maxdepth(self):
-        """walk() met maxdepth=None mag niet crashen op None - 1 (oude bug)."""
+        """walk() with maxdepth=None must not crash on None - 1 (old bug)."""
         fs = NestedFileSystem(nested_mapping)
         with fs.open("a/test.txt", "w") as f:
             f.write("x")
 
-        # Mag niet TypeError op None - 1 geven
+        # Must not raise TypeError on None - 1.
         results = list(fs.walk(""))
         self.assertGreater(len(results), 0)
 
     def test_walk_specific_subfs(self):
-        """walk() op een specifieke sub-fs path."""
+        """walk() on a specific sub-fs path."""
         fs = NestedFileSystem(nested_mapping)
         with fs.open("a/dir1/file1.txt", "w") as f:
             f.write("x")
@@ -390,7 +391,7 @@ class TestNextedPathFileSystem(unittest.TestCase):
             f.write("y")
 
         results = list(fs.walk("a"))
-        # Verzamel alle file paden
+        # Collect every file path.
         all_files = set()
         for base, dirs, files in results:
             for f in files:

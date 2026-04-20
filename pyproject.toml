@@ -36,15 +36,19 @@ dynamic = [
 dependencies = [
   "Django>=5.0",
   "fsspec>=2025.2.0",
-  "s3fs>=2025.2.0"
 ]
+
 [project.optional-dependencies]
-#s3 = [
-#  "s3fs>=2025.2.0"
-#]
+s3 = [
+  "s3fs>=2025.2.0",
+  "boto3",
+]
 
 [project.urls]
-Homepage = "https://github.com/GetThePointGit/django-fsspec"
+Homepage = "https://github.com/bastiaan-roos/django-fsspec"
+Source = "https://github.com/bastiaan-roos/django-fsspec"
+Issues = "https://github.com/bastiaan-roos/django-fsspec/issues"
+Changelog = "https://github.com/bastiaan-roos/django-fsspec/blob/main/CHANGELOG.rst"
 
 [tool.setuptools]
 zip-safe = false

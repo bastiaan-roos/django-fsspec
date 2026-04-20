@@ -16,8 +16,8 @@ try:
 except ImportError:
     load_dotenv = None
 
-# Laad .env uit de test-directory (optioneel) zodat lokaal ontwikkelen
-# met een tests/.env bestand werkt. In CI mogen env-vars direct gezet zijn.
+# Load .env from the test directory (optional) so local development
+# with a tests/.env file works. In CI env vars may be set directly.
 _ENV_PATH = Path(__file__).parent / ".env"
 if load_dotenv is not None and _ENV_PATH.exists():
     load_dotenv(_ENV_PATH, override=False)

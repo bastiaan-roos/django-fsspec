@@ -14,7 +14,7 @@ from django.conf import settings
 from django.urls import reverse
 
 test_data_dir = Path(Path(__file__).parent, "tmp")
-# Zorg ervoor dat Django settings zijn geconfigureerd
+# Make sure Django settings are configured.
 
 settings.configure(
     DEBUG=True,
