@@ -6,6 +6,7 @@ from fsspec import AbstractFileSystem
 from fsspec import register_implementation
 
 from .utils import get_filesystem
+from .utils import unwrap_s3_target
 
 
 class ExistsReturn(object):
@@ -458,6 +459,35 @@ class TransparentFileSystem(AbstractFileSystem):
     def modified(self, path):
         fs = self.__leading_fs(path)
         return fs.modified(path)
+
+    def resolve_s3_target(self, path: str):
+        """Resolve `path` to the base filesystem's (S3FileSystem, bucket, key).
+
+        Signing URLs against a transparent layer is meaningless (the
+        writeable overlay is typically local), so this always delegates to
+        `base_fs`. Callers that want signed URLs should hit the real
+        backend.
+
+        Parameters
+        ----------
+        path : str
+
+        Returns
+        -------
+        tuple of (s3fs.S3FileSystem, str, str)
+
+        Raises
+        ------
+        NotImplementedError
+            When `base_fs` is not backed by an `S3FileSystem`, or when it
+            is itself a composed filesystem without a
+            ``resolve_s3_target`` method.
+        """
+        base_fs = self.base_fs
+        resolver = getattr(base_fs, "resolve_s3_target", None)
+        if resolver is not None:
+            return resolver(path)
+        return unwrap_s3_target(base_fs, path)
 
 
 # Registreer het bestandssysteem

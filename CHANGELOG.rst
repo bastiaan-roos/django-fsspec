@@ -1,8 +1,55 @@
 CHANGELOG
 =========
 
-Unreleased (0.0.1a2 — vendored fork)
-------------------------------------
+Unreleased (0.0.1a2)
+--------------------
+
+New features
+~~~~~~~~~~~~
+
+- ``FsspecStorage.url_signed(name, expires=3600, method='GET',
+  response_headers=None)`` generates S3 presigned URLs against the
+  underlying backend through the ``NestedFileSystem`` /
+  ``DirFileSystem`` wrappers. Both ``GET`` (download) and ``PUT``
+  (upload) are supported; ``response_headers`` lets callers inject
+  ``ResponseContentDisposition`` and friends on downloads.
+- ``FsspecStorage.url_direct(name)`` returns the un-signed,
+  virtual-hosted-style URL for buckets with public-read ACL.
+- ``NestedFileSystem.resolve_s3_target(path)`` resolves a nested path
+  to the underlying ``(S3FileSystem, bucket, key)`` tuple so signing
+  helpers can reach boto3 directly. Delegates sensibly through
+  ``TransparentFileSystem`` (signs against ``base_fs``).
+- ``FsspecStorage`` accepts a ``verify_checksum`` OPTION; when set,
+  ``_save`` compares ``content.checksum`` against the stored
+  checksum after upload and removes the object on mismatch.
+- New utility helpers in ``django_fsspec.utils``:
+  ``unwrap_s3_target``, ``make_boto3_client_from_s3fs``,
+  ``build_virtual_hosted_url``.
+
+Tests (0.0.1a2)
+~~~~~~~~~~~~~~~
+
+- ``tests/test_with_s3.py`` now loads env vars via ``python-dotenv``
+  (optional dependency) instead of the in-house ``VariabeleLoader``;
+  no credentials live in the test code itself.
+- Added 10 presigned-URL and resolver tests:
+  ``test_resolve_s3_target_nested``, ``test_presigned_get_roundtrip``,
+  ``test_presigned_get_response_headers``,
+  ``test_presigned_put_upload``, ``test_presigned_expiry``,
+  ``test_presigned_put_with_response_headers_raises``,
+  ``test_presigned_invalid_method_raises``,
+  ``test_resolve_s3_target_raises_for_local_fs``,
+  ``test_resolve_s3_target_raises_for_default_local``,
+  ``test_resolve_s3_target_no_match_raises_filenotfound``, plus
+  two ``verify_checksum`` scenarios.
+
+Docstrings
+~~~~~~~~~~
+
+- Rewrote the ``FsspecStorage`` class-level example docstring to valid
+  Python (unquoted ``fs:`` keys and the missing ``secret_key`` closing
+  quote are gone). Added NumPy-style docstrings for the new public
+  methods.
 
 Bug fixes (FsspecStorage)
 ~~~~~~~~~~~~~~~~~~~~~~~~~

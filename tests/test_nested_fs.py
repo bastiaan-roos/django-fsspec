@@ -399,3 +399,30 @@ class TestNextedPathFileSystem(unittest.TestCase):
 
         self.assertIn("a/dir1/file1.txt", all_files)
         self.assertIn("a/dir1/file2.txt", all_files)
+
+    def test_resolve_s3_target_raises_for_local_fs(self):
+        """resolve_s3_target on non-S3 sub-fs must raise NotImplementedError."""
+        fs = NestedFileSystem(nested_mapping)
+        # Prefix 'a' routes to the local DirFileSystem
+        with self.assertRaises(NotImplementedError) as ctx:
+            fs.resolve_s3_target("a/foo.txt")
+        self.assertIn("S3FileSystem", str(ctx.exception))
+
+    def test_resolve_s3_target_raises_for_default_local(self):
+        """Default local fallback must raise NotImplementedError too."""
+        fs = NestedFileSystem(nested_mapping)
+        with self.assertRaises(NotImplementedError):
+            fs.resolve_s3_target("foo.txt")
+
+    def test_resolve_s3_target_no_match_raises_filenotfound(self):
+        """Path with unknown prefix and no `default` must raise FileNotFoundError."""
+        mapping_no_default = {
+            "only_a": {
+                "protocol": "local",
+                "auto_mkdir": True,
+                "relative_to_path": root_fs1,
+            },
+        }
+        fs = NestedFileSystem(mapping_no_default)
+        with self.assertRaises(FileNotFoundError):
+            fs.resolve_s3_target("unknown/foo.txt")

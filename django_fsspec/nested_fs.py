@@ -5,6 +5,7 @@ from fsspec import AbstractFileSystem
 from fsspec import register_implementation
 
 from .utils import get_filesystem
+from .utils import unwrap_s3_target
 
 
 class NestedFileSystem(AbstractFileSystem):
@@ -107,6 +108,35 @@ class NestedFileSystem(AbstractFileSystem):
         if "default" in self.file_systems:
             return self.file_systems["default"], "", path_str
         return None, "", path_str
+
+    def resolve_s3_target(self, path: str):
+        """Resolve `path` to the underlying (S3FileSystem, bucket, key).
+
+        Parameters
+        ----------
+        path : str
+            Path in nested notation (e.g. ``'video/foo.mp4'``).
+
+        Returns
+        -------
+        tuple of (s3fs.S3FileSystem, str, str)
+            The underlying `s3fs.S3FileSystem`, the bucket name (taken from
+            the sub-filesystem's `DirFileSystem` root), and the object key
+            within that bucket.
+
+        Raises
+        ------
+        FileNotFoundError
+            When no sub-filesystem matches `path` and no `default` is
+            configured.
+        NotImplementedError
+            When the matched sub-filesystem does not ultimately route to an
+            `S3FileSystem` (e.g. the local ``default`` fallback).
+        """
+        fs, _root_path, nested_path = self._get_filesystem(path)
+        if fs is None:
+            raise FileNotFoundError(f"No sub-filesystem for path {path!r}")
+        return unwrap_s3_target(fs, nested_path)
 
     def mkdir(self, path, *args, **kwargs):
         fs, root_path, nested_path = self._get_filesystem(path)
