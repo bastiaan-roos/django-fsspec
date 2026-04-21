@@ -2,6 +2,7 @@
 name = "django-fsspec"
 channels = ["conda-forge"]
 platforms = ["linux-64", "linux-aarch64", "osx-arm64", "osx-64"]
+repository = "https://github.com/bastiaan-roos/django-fsspec"
 
 # -----------------------------------------------------------------------------
 # Tasks (pixi run <name>)
@@ -59,10 +60,11 @@ pytest-django = "*"
 ruff = "*"
 build = "*"
 twine = "*"
-setuptools = ">=77.0.0"
 python-dotenv = "*"
 tox = "*"
 pre-commit = "*"
+
+pixi-pycharm = "0.0.11"
 
 # -----------------------------------------------------------------------------
 # Environments
