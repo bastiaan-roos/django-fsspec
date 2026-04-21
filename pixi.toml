@@ -2,27 +2,30 @@
 name = "django-fsspec"
 channels = ["conda-forge"]
 platforms = ["linux-64", "linux-aarch64", "osx-arm64", "osx-64"]
+repository = "https://github.com/bastiaan-roos/django-fsspec"
 
 # -----------------------------------------------------------------------------
 # Tasks (pixi run <name>)
 # -----------------------------------------------------------------------------
-[tasks]
+# Scoped under the `dev` feature so they are only available in environments
+# that include the dev dependencies (ruff, tox, build, twine, pre-commit).
+[feature.dev.tasks]
 # --- Testing ---
-tests = "pytest --cov=django_fsspec"
+tests = "pytest --cov=django_fsspec --cov-report=term-missing --cov-report=xml"
 tests-verbose = "pytest --cov=django_fsspec -v"
 # Run the full Python × Django matrix (requires tox)
 tox = "tox"
 
-# --- Styling / linting (matches drainworks conventions) ---
+# --- Styling / linting ---
 # `style` auto-sorts imports and formats. `lint` only checks django_fsspec/
 # (tests get their own relaxed rules — see pyproject.toml).
 sort-imports = "ruff check ./django_fsspec ./tests --select I --fix --force-exclude"
-fmt = "ruff format ./django_fsspec ./tests --force-exclude"
-style = { depends-on = ["sort-imports", "fmt"] }
+format = "ruff format ./django_fsspec ./tests --force-exclude"
+style = { depends-on = ["sort-imports", "format"] }
 lint = "ruff check ./django_fsspec"
 
 # --- Build / publish ---
-build-clean = { cmd = "rm -rf dist build *.egg-info django_fsspec.egg-info" }
+build-clean = "rm -rf dist build *.egg-info django_fsspec.egg-info"
 build = { cmd = "python -m build", depends-on = ["build-clean"] }
 build-check = { cmd = "python -m twine check dist/*", depends-on = ["build"] }
 publish-test = { cmd = "python -m twine upload --repository testpypi dist/*", depends-on = ["build-check"] }
@@ -57,10 +60,11 @@ pytest-django = "*"
 ruff = "*"
 build = "*"
 twine = "*"
-setuptools = ">=77.0.0"
 python-dotenv = "*"
 tox = "*"
 pre-commit = "*"
+
+pixi-pycharm = "0.0.11"
 
 # -----------------------------------------------------------------------------
 # Environments
