@@ -197,7 +197,7 @@ STORAGES = {
 | `base_url`                   | str      | `None`       | Prefix returned by `storage.url(name)`. Required for `url()` to work. |
 | `permissions`                | dict     | all `True`   | `{"allow_read": ..., "allow_write": ..., "allow_delete": ...}`. Denied actions raise `PermissionError`. See [Permissions](#permissions-and-on_collision). |
 | `on_collision`               | str      | `"overwrite"`| One of `"overwrite"` / `"rename"` / `"raise"` — what `_save` does when the target name already exists. |
-| `allow_overwrite`            | bool     | —            | **Deprecated** — emits `DeprecationWarning` and maps to `on_collision="overwrite"` (`True`) or `"rename"` (`False`). Setting both → `ImproperlyConfigured`. |
+| `allow_overwrite`            | bool     | —            | **Deprecated, removed in 0.2.0** — emits `DeprecationWarning` and maps to `on_collision="overwrite"` (`True`) or `"rename"` (`False`). Setting both → `ImproperlyConfigured`. After construction `storage.allow_overwrite` is a derived read-only attribute (Django 5.1+ contract); it is `False` only when `on_collision="rename"`. |
 | `verify_checksum`            | bool     | `False`      | After upload, compare `content.checksum` against the backend-reported checksum; mismatch deletes the object and raises `IOError`. |
 | `location`                   | str      | `""`         | Only valid when `storage_config["protocol"]` is `"file"` / `"local"` — forwarded as `relative_to_path`. Other protocols (or co-existing with `storage_config["relative_to_path"]`) → `ImproperlyConfigured`. |
 | `file_permissions_mode`      | int      | `None`       | **Not applied** — emits `DeprecationWarning` when set. Reserved for future local-fs support. |
@@ -352,6 +352,26 @@ refuses with `PermissionError`.
 
 Here `archive/...` paths are read-only and refuse overwrites; `upload/...`
 keeps the default permissive setup.
+
+#### Limitations
+
+- **The underlying fsspec filesystem is reachable as `storage.filesystem`.**
+  `permissions` gates `FsspecStorage`'s public methods (`_open`, `_save`,
+  `delete`, `url_signed`, `url_direct`); code that obtains
+  `storage.filesystem` and calls `rm` / `cp_file` / `mv` directly
+  bypasses the gate. If you need filesystem-level enforcement, build
+  that into the fsspec layer (or wrap `storage.filesystem` yourself).
+- **Presigned URLs are opaque after issuance.** `url_signed(method="PUT")`
+  refuses upfront when the target already exists and `on_collision`
+  forbids the overwrite, but there is a small race window between the
+  check and the actual upload. For strict enforcement on multi-writer
+  scenarios, use server-side checks too.
+- **`storage.delete(name)` raises `FileNotFoundError`** when the path
+  does not exist; this differs from Django's `FileSystemStorage`, which
+  is silent on missing files.
+- **`NestedFileSystem.rm(path, recursive=True)` only removes from the
+  matched sub-filesystem.** Removing the conceptual root recursively
+  does not walk every sub-filesystem yet.
 
 #### Migrating from `allow_overwrite`
 

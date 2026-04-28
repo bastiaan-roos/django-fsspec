@@ -4,67 +4,19 @@ import warnings
 from pathlib import Path
 
 import django
-from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from django.core.files.base import ContentFile
 from django.core.files.storage import storages
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.core.management import call_command
 from django.test import Client
 from django.test import TestCase
 from django.urls import reverse
 
+# Django settings are configured in tests/conftest.py.
 test_data_dir = Path(Path(__file__).parent, "tmp")
-# Make sure Django settings are configured.
-
-settings.configure(
-    DEBUG=True,
-    INSTALLED_APPS=[
-        "test_app",
-    ],
-    ROOT_URLCONF="urls",
-    DATABASES={
-        "default": {
-            "ENGINE": "django.db.backends.sqlite3",
-            "NAME": ":memory:",
-        }
-    },
-    STORAGES={
-        "default": {
-            "BACKEND": "django_fsspec.FsspecStorage",
-            "OPTIONS": {
-                # Tests in this fixture rely on the rename-on-collision
-                # behavior (test_functions_part_two checks that a duplicate
-                # save returns a unique name). The package default is
-                # `overwrite`, so we make it explicit here.
-                "on_collision": "rename",
-                "storage_config": {
-                    "protocol": "dir",
-                    "path": test_data_dir,
-                    "target_protocol": "local",
-                    "target_options": {
-                        "auto_mkdir": True,  # make directories if they do not exist
-                    },
-                },
-            },
-        }
-    },
-)
-
-django.setup()
-call_command("migrate", "--run-syncdb", verbosity=0)
-
-
-# test as django app# from django.core.files.storage import Storage
 
 
 class TestFsspecStorage(TestCase):
-    # settings_module = 'django-fsspec.tests.test_site.project.settings'
-    @classmethod
-    def setUpClass(cls):
-        super().setUpClass()
-        # Initialize Django
-
     def setUp(self):
         os.makedirs(test_data_dir, exist_ok=True)
         # os.makedirs(test_data_dir / "test", exist_ok=True)

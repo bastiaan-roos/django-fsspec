@@ -109,7 +109,8 @@ class FsspecStorage(Storage):
         for unused in ("file_permissions_mode", "directory_permissions_mode"):
             if getattr(self, unused) is not None:
                 warnings.warn(
-                    f"FsspecStorage ignores {unused!r}; it is not currently implemented for any fsspec backend.",
+                    f"FsspecStorage ignores {unused!r}; it is not currently implemented "
+                    "for any fsspec backend and will be dropped in 0.2.0.",
                     DeprecationWarning,
                     stacklevel=2,
                 )
@@ -171,8 +172,8 @@ class FsspecStorage(Storage):
                 "use only 'on_collision' (allow_overwrite is deprecated)."
             )
         warnings.warn(
-            "FsspecStorage option 'allow_overwrite' is deprecated; "
-            "use on_collision='overwrite' (default) or 'rename' instead.",
+            "FsspecStorage option 'allow_overwrite' is deprecated and will be "
+            "removed in 0.2.0; use on_collision='overwrite' (default) or 'rename' instead.",
             DeprecationWarning,
             stacklevel=3,
         )
