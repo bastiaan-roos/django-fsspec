@@ -1,14 +1,21 @@
 import posixpath
+import warnings
 
 from django.core.exceptions import ImproperlyConfigured
 from django.core.files.storage import Storage
-from django.core.files.storage import Storage as _StorageBase
 from django.utils.crypto import get_random_string
 
+from .nested_fs import NestedFileSystem
+from .permissions import combine_on_collision
+from .permissions import combine_permissions
+from .permissions import normalize_on_collision
+from .permissions import normalize_permissions
 from .utils import build_virtual_hosted_url
 from .utils import get_filesystem
 from .utils import make_boto3_client_from_s3fs
 from .utils import unwrap_s3_target
+
+_UNSET = object()
 
 
 class FsspecStorage(Storage):
@@ -85,21 +92,131 @@ class FsspecStorage(Storage):
         self.base_url = settings_cp.pop("base_url", None)
         self.file_permissions_mode = settings_cp.pop("file_permissions_mode", None)
         self.directory_permissions_mode = settings_cp.pop("directory_permissions_mode", None)
-        self.allow_overwrite = settings_cp.pop("allow_overwrite", True)
         # After a _save write, compare the stored checksum with
         # `content.checksum` (if set). Mismatch → delete the object and
         # raise IOError. Default off: costs an extra round-trip per save.
         self.verify_checksum = settings_cp.pop("verify_checksum", False)
 
+        self.permissions = normalize_permissions(settings_cp.pop("permissions", None))
+        self.on_collision = self._resolve_on_collision_option(settings_cp)
+        # Django's Storage.save() inspects this attr (>=5.1) to decide whether
+        # to call get_available_name. Honor the on_collision intent: only
+        # `rename` should let Django auto-rename.
+        self.allow_overwrite = self.on_collision != "rename"
+
+        # Permission modes are accepted for symmetry with FileSystemStorage
+        # but not currently honored by any FsspecStorage backend.
+        for unused in ("file_permissions_mode", "directory_permissions_mode"):
+            if getattr(self, unused) is not None:
+                warnings.warn(
+                    f"FsspecStorage ignores {unused!r}; it is not currently implemented for any fsspec backend.",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+
         if "storage_config" not in settings_cp:
             raise ImproperlyConfigured("storage_config is required")
-        storage_config = settings_cp.pop("storage_config")
-        self.filesystem = get_filesystem(**storage_config)
+        # Copy so that mapping `location` into it does not mutate the
+        # caller's STORAGES dict.
+        storage_config = dict(settings_cp.pop("storage_config"))
+
+        # Bridge Django's `location` into the underlying fsspec config.
+        # Only meaningful for the local filesystem protocols; for any other
+        # protocol the user must use storage_config['relative_to_path']
+        # explicitly (`location` semantics differ per backend, so we refuse
+        # to silently guess what the user meant).
+        if self.location:
+            protocol = storage_config.get("protocol")
+            if protocol not in ("file", "local"):
+                raise ImproperlyConfigured(
+                    f"OPTIONS['location'] is only supported with storage_config "
+                    f"protocol='file'/'local', got protocol={protocol!r}. "
+                    "Use storage_config['relative_to_path'] instead."
+                )
+            if "relative_to_path" in storage_config:
+                raise ImproperlyConfigured(
+                    "Cannot set both OPTIONS['location'] and storage_config['relative_to_path']; pick one."
+                )
+            storage_config["relative_to_path"] = self.location
 
         if settings_cp:
-            raise ImproperlyConfigured(f"Unknown setting(s): {settings_cp.keys()}")
+            raise ImproperlyConfigured(f"Unknown setting(s): {list(settings_cp.keys())}")
+
+        self.filesystem = get_filesystem(**storage_config)
+        # Pre-compute effective (top-level ∧ sub-fs) permissions per nested
+        # prefix so per-call lookups are a single dict access. For flat
+        # storages there is no sub-fs to combine with — the cache stays empty.
+        self._effective_perms_by_prefix: dict[str, tuple[dict, str]] = {}
+        if isinstance(self.filesystem, NestedFileSystem):
+            for prefix, sub_perms in self.filesystem.permissions.items():
+                self._effective_perms_by_prefix[prefix] = (
+                    combine_permissions(self.permissions, sub_perms),
+                    combine_on_collision(self.on_collision, self.filesystem.on_collision[prefix]),
+                )
+
+    @staticmethod
+    def _resolve_on_collision_option(settings_cp: dict) -> str:
+        """Resolve ``on_collision`` from settings, honoring the deprecated alias.
+
+        ``allow_overwrite`` is mapped onto ``on_collision`` for backwards
+        compatibility; setting both at once is ambiguous and raises.
+        """
+        on_collision_raw = settings_cp.pop("on_collision", None)
+        allow_overwrite_raw = settings_cp.pop("allow_overwrite", _UNSET)
+        if allow_overwrite_raw is _UNSET:
+            return normalize_on_collision(on_collision_raw)
+        if on_collision_raw is not None:
+            raise ImproperlyConfigured(
+                "Cannot set both 'allow_overwrite' and 'on_collision'; "
+                "use only 'on_collision' (allow_overwrite is deprecated)."
+            )
+        warnings.warn(
+            "FsspecStorage option 'allow_overwrite' is deprecated; "
+            "use on_collision='overwrite' (default) or 'rename' instead.",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+        return normalize_on_collision("overwrite" if allow_overwrite_raw else "rename")
+
+    def _resolve_effective(self, name: str) -> tuple[dict, str]:
+        """Return effective ``(permissions, on_collision)`` for ``name``."""
+        if not isinstance(self.filesystem, NestedFileSystem):
+            return self.permissions, self.on_collision
+        fs, root_path, _ = self.filesystem._get_filesystem(name)
+        if fs is None:
+            return self.permissions, self.on_collision
+        key = root_path if root_path else "default"
+        return self._effective_perms_by_prefix.get(key, (self.permissions, self.on_collision))
+
+    def _check_permission(self, action: str, name: str) -> None:
+        """Raise ``PermissionError`` when ``action`` is not allowed for ``name``.
+
+        Parameters
+        ----------
+        action : {'read', 'write', 'delete'}
+        name : str
+        """
+        perms, _ = self._resolve_effective(name)
+        key = f"allow_{action}"
+        if not perms[key]:
+            raise PermissionError(f"FsspecStorage permission denied: {action} {name!r} ({key}=False)")
+
+    def is_name_available(self, name, max_length=None):
+        """Defer to ``on_collision`` instead of Django's rename loop.
+
+        For ``on_collision`` ∈ {``"overwrite"``, ``"raise"``} the caller's
+        chosen name should hit ``_save`` verbatim so the collision policy
+        can be enforced there. Only ``"rename"`` keeps Django's standard
+        rename-if-taken behavior.
+        """
+        if self.on_collision == "rename":
+            return super().is_name_available(name, max_length=max_length)
+        if max_length and len(name) > max_length:
+            return False
+        return True
 
     def delete(self, name):
+        self._check_permission("delete", name)
         return self.filesystem.rm(name)
 
     def exists(self, name):
@@ -141,6 +258,10 @@ class FsspecStorage(Storage):
         return self.filesystem.ls(path, detail=True)
 
     def _open(self, name, mode="rb"):
+        if any(c in mode for c in ("w", "a", "x", "+")):
+            self._check_permission("write", name)
+        else:
+            self._check_permission("read", name)
         return self.filesystem.open(name, mode)
 
     def path(self, name):
@@ -156,6 +277,8 @@ class FsspecStorage(Storage):
         )
 
     def _save(self, name, content, max_length=None):
+        self._check_permission("write", name)
+
         # Ensure the parent directory exists (relevant for the file://
         # backend and nested filesystems that do not implicitly makedirs).
         parent = posixpath.dirname(name)
@@ -166,35 +289,52 @@ class FsspecStorage(Storage):
                 pass
 
         if self.exists(name):
-            if self.allow_overwrite:
-                self.delete(name)
-            else:
-                # Do not overwrite; Django's Storage.save() normally calls
-                # get_available_name() before _save, so this is an edge
-                # case. Return an alternative name so Django sees the
-                # correct value.
-                base_name = _StorageBase.get_available_name(self, name, max_length=max_length)
-                return self._save(base_name, content, max_length=max_length)
+            redirected = self._handle_collision(name, content, max_length)
+            if redirected is not None:
+                return redirected
 
-        # Streaming write: for UploadedFile we use chunks() to avoid
-        # loading the entire file into memory. For ContentFile / BytesIO
-        # we fall back to a single read().
-        with self.filesystem.open(name, "wb") as f:
-            if hasattr(content, "chunks"):
-                for chunk in content.chunks():
-                    f.write(chunk)
-            else:
-                # File-like without chunks(): copy in 4 MB blocks.
-                while True:
-                    block = content.read(4 * 1024 * 1024)
-                    if not block:
-                        break
-                    f.write(block)
+        self._stream_to_filesystem(name, content)
 
         if self.verify_checksum:
             self._verify_checksum_after_save(name, content)
 
         return name
+
+    def _handle_collision(self, name, content, max_length):
+        """Apply the effective ``on_collision`` policy when ``name`` exists.
+
+        Returns the alternative name when the policy is ``"rename"`` (so the
+        caller should return that instead), or ``None`` after handling
+        ``"overwrite"`` (caller should proceed with the write). Raises for
+        ``"raise"``.
+        """
+        _, on_collision = self._resolve_effective(name)
+        if on_collision == "raise":
+            raise PermissionError(f"FsspecStorage on_collision='raise': {name!r} already exists")
+        if on_collision == "overwrite":
+            # Internal cleanup; the caller's intent is "write", so this is
+            # implementation detail and not gated by allow_delete.
+            self.filesystem.rm(name)
+            return None
+        # "rename" — Django was supposed to call get_available_name first;
+        # defensive fallback for direct calls bypassing Storage.save.
+        alt_name = super().get_available_name(name, max_length=max_length)
+        return self._save(alt_name, content, max_length=max_length)
+
+    def _stream_to_filesystem(self, name, content):
+        """Stream ``content`` into ``name`` on the underlying filesystem."""
+        with self.filesystem.open(name, "wb") as f:
+            if hasattr(content, "chunks"):
+                # UploadedFile path — avoids loading the entire file into memory.
+                for chunk in content.chunks():
+                    f.write(chunk)
+            else:
+                # File-like without chunks() (ContentFile, BytesIO): copy in 4 MB blocks.
+                while True:
+                    block = content.read(4 * 1024 * 1024)
+                    if not block:
+                        break
+                    f.write(block)
 
     def _verify_checksum_after_save(self, name, content):
         # The caller sets the source checksum on `content.checksum` (e.g.
@@ -240,6 +380,7 @@ class FsspecStorage(Storage):
             When the underlying backend is not S3-compatible, or has no
             endpoint URL configured.
         """
+        self._check_permission("read", name)
         s3_fs, bucket, key = self._resolve_s3_target(name)
         return build_virtual_hosted_url(s3_fs, bucket, key)
 
@@ -276,6 +417,22 @@ class FsspecStorage(Storage):
             raise ValueError(f"method must be 'GET' or 'PUT', got {method!r}")
         if method == "PUT" and response_headers:
             raise ValueError("response_headers is only valid for method='GET'")
+
+        if method == "GET":
+            self._check_permission("read", name)
+        else:
+            self._check_permission("write", name)
+            # Presigned URLs are opaque after issuance, so we cannot enforce
+            # on_collision once the client uses them. Refuse upfront for
+            # 'raise' (the caller asked for strictness) and ask the user to
+            # rename ahead of time for 'rename'.
+            _, on_collision = self._resolve_effective(name)
+            if on_collision != "overwrite" and self.exists(name):
+                raise PermissionError(
+                    f"FsspecStorage on_collision={on_collision!r}: cannot issue "
+                    f"a presigned PUT for {name!r} because it already exists "
+                    "(presigned URLs bypass server-side collision policy)."
+                )
 
         s3_fs, bucket, key = self._resolve_s3_target(name)
 

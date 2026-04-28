@@ -3,6 +3,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import fsspec
+from django.core.exceptions import ImproperlyConfigured
 from fsspec import AbstractFileSystem
 from fsspec.implementations.dirfs import DirFileSystem
 
@@ -53,6 +54,7 @@ def get_filesystem(
             raise ValueError("fs must be a fsspec filesystem object")
         fs_out = fs
     elif protocol:
+        _validate_protocol_config(protocol, relative_to_path, storage_config)
         fs_out = fsspec.filesystem(protocol, **storage_config)
     else:
         raise ValueError("either fs or protocol must be provided")
@@ -60,6 +62,50 @@ def get_filesystem(
     if relative_to_path is not None:
         fs_out = DirFileSystem(fs=fs_out, path=relative_to_path)
     return fs_out
+
+
+def _validate_protocol_config(
+    protocol: str,
+    relative_to_path: typing.Optional[str | Path],
+    storage_config: typing.Mapping[str, typing.Any],
+) -> None:
+    """Sanity-check a `storage_config` against the chosen ``protocol``.
+
+    Parameters
+    ----------
+    protocol : str
+        fsspec protocol name (e.g. ``'s3'``, ``'nested'``, ``'transparent'``).
+    relative_to_path : str or Path, optional
+        ``relative_to_path`` value popped from the storage config.
+    storage_config : Mapping[str, Any]
+        Remaining keys from the storage config (i.e. without ``fs``,
+        ``protocol``, ``relative_to_path``).
+
+    Raises
+    ------
+    django.core.exceptions.ImproperlyConfigured
+        When the protocol-specific required keys are missing.
+    """
+    if protocol == "s3":
+        if relative_to_path is None:
+            raise ImproperlyConfigured(
+                "storage_config protocol='s3' requires 'relative_to_path' to fix the "
+                "bucket (and optional key prefix), e.g. relative_to_path='my-bucket' "
+                "or 'my-bucket/uploads/2026'."
+            )
+    elif protocol == "nested":
+        if "path_storage_configs" not in storage_config:
+            raise ImproperlyConfigured(
+                "storage_config protocol='nested' requires 'path_storage_configs' "
+                "(a dict mapping prefix → sub storage_config)."
+            )
+    elif protocol == "transparent":
+        missing = [k for k in ("transparent_fs", "base_fs") if k not in storage_config]
+        if missing:
+            raise ImproperlyConfigured(
+                f"storage_config protocol='transparent' requires {missing}; "
+                "transparent_fs is the writable overlay, base_fs is the read-only base."
+            )
 
 
 def unwrap_s3_target(fs: AbstractFileSystem, path: str):

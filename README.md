@@ -22,7 +22,7 @@ pip install django-fsspec          # core only
 pip install django-fsspec[s3]      # with S3 support (pulls in s3fs)
 ```
 
-## Quick start — local filesystem
+## Use case 1a — local filesystem
 
 ```python
 # settings.py
@@ -30,18 +30,18 @@ STORAGES = {
     "default": {
         "BACKEND": "django_fsspec.FsspecStorage",
         "OPTIONS": {
-            "location": "/var/myapp/media",
             "base_url": "/media/",
             "storage_config": {
                 "protocol": "file",
                 "auto_mkdir": True,
+                "relative_to_path": "/var/myapp/media",
             },
         },
     },
 }
 ```
 
-## Use case 1 — single S3 bucket
+## Use case 1b — single S3 bucket
 
 ```python
 STORAGES = {
@@ -61,19 +61,22 @@ STORAGES = {
 }
 ```
 
-Then in your Django code:
+In your Django code (works for both 1a and 1b):
 
 ```python
 from django.core.files.storage import default_storage
 from django.core.files.base import ContentFile
 
 default_storage.save("hello.txt", ContentFile(b"hi"))
-default_storage.exists("hello.txt")     # True
+# 1a (file) → /var/myapp/media/hello.txt
+# 1b (s3)   → s3://my-bucket/hello.txt
+
+default_storage.exists("hello.txt")      # True
 default_storage.size("hello.txt")        # 2
 with default_storage.open("hello.txt") as f:
     print(f.read())
 
-# Presigned download URL (1 hour TTL)
+# Presigned download URL (1 hour TTL) — only meaningful for 1b (S3)
 url = default_storage.url_signed("hello.txt", expires=3600)
 
 # Presigned upload URL
@@ -134,7 +137,27 @@ STORAGES = {
 `upload/foo.ribx` → `myapp-upload` bucket; `video/intro.mp4` → `myapp-video`;
 `other/file.txt` → local disk.
 
-## Use case 3 — read-through cache with `TransparentFileSystem`
+## Use case 3 — sub-directory of an S3 bucket
+
+There is no `bucket_name` setting — fsspec/s3fs treats the bucket as the
+first segment of every path. Use `relative_to_path` to pin a bucket (or a
+subdirectory inside one) as the virtual root:
+
+```python
+"storage_config": {
+    "protocol": "s3",
+    "endpoint_url": S3_ENDPOINT,
+    "key": S3_KEY, "secret": S3_SECRET,
+    # Storage's virtual root → s3://my-bucket/uploads/2026/
+    "relative_to_path": "my-bucket/uploads/2026",
+},
+```
+
+Then `default_storage.save("hello.txt", ...)` writes to
+`s3://my-bucket/uploads/2026/hello.txt`. See
+[What `relative_to_path` does](#what-relative_to_path-does) below.
+
+## Use case 4 — read-through cache with `TransparentFileSystem`
 
 For local development: use a local writable layer on top of a remote
 bucket. Reads go to the local cache first, and fall through to S3 on a
@@ -163,6 +186,185 @@ STORAGES = {
     },
 }
 ```
+
+## Configuration reference
+
+### Top-level `OPTIONS` for `FsspecStorage`
+
+| Key                          | Type     | Default      | Description |
+| ---------------------------- | -------- | ------------ | ----------- |
+| `storage_config`             | dict     | **required** | Configuration for the underlying fsspec filesystem (see protocol tables below). |
+| `base_url`                   | str      | `None`       | Prefix returned by `storage.url(name)`. Required for `url()` to work. |
+| `permissions`                | dict     | all `True`   | `{"allow_read": ..., "allow_write": ..., "allow_delete": ...}`. Denied actions raise `PermissionError`. See [Permissions](#permissions-and-on_collision). |
+| `on_collision`               | str      | `"overwrite"`| One of `"overwrite"` / `"rename"` / `"raise"` — what `_save` does when the target name already exists. |
+| `allow_overwrite`            | bool     | —            | **Deprecated** — emits `DeprecationWarning` and maps to `on_collision="overwrite"` (`True`) or `"rename"` (`False`). Setting both → `ImproperlyConfigured`. |
+| `verify_checksum`            | bool     | `False`      | After upload, compare `content.checksum` against the backend-reported checksum; mismatch deletes the object and raises `IOError`. |
+| `location`                   | str      | `""`         | Only valid when `storage_config["protocol"]` is `"file"` / `"local"` — forwarded as `relative_to_path`. Other protocols (or co-existing with `storage_config["relative_to_path"]`) → `ImproperlyConfigured`. |
+| `file_permissions_mode`      | int      | `None`       | **Not applied** — emits `DeprecationWarning` when set. Reserved for future local-fs support. |
+| `directory_permissions_mode` | int      | `None`       | **Not applied** — emits `DeprecationWarning` when set. Reserved for future local-fs support. |
+
+### Common keys for every `storage_config`
+
+These work regardless of protocol:
+
+| Key                | Type                  | Description |
+| ------------------ | --------------------- | ----------- |
+| `protocol`         | str                   | fsspec protocol name (`"file"`, `"s3"`, `"nested"`, `"transparent"`, ...). |
+| `fs`               | `AbstractFileSystem`  | Pre-built fsspec filesystem object. Mutually exclusive with `protocol`. |
+| `relative_to_path` | str / Path            | Wraps the resulting filesystem in a `DirFileSystem` rooted at this path. See [below](#what-relative_to_path-does). |
+| (other keys)       | any                   | Forwarded to `fsspec.filesystem(protocol, **kwargs)` — see per-protocol tables. |
+
+### `protocol="file"` (alias `"local"`) — local filesystem
+
+Backed by `fsspec.implementations.local.LocalFileSystem`.
+
+| Key                | Type       | Default | Description |
+| ------------------ | ---------- | ------- | ----------- |
+| `auto_mkdir`       | bool       | `False` | Create parent directories on write. Recommended `True` for Django uploads. |
+| `relative_to_path` | str / Path | `None`  | Pin every operation under this directory (e.g. `/var/myapp/media`). |
+
+### `protocol="s3"` — Amazon S3 / S3-compatible
+
+Backed by `s3fs.S3FileSystem`. Install with `pip install django-fsspec[s3]`.
+
+| Key                    | Type   | Description |
+| ---------------------- | ------ | ----------- |
+| `key`                  | str    | Access key ID. |
+| `secret`               | str    | Secret access key. |
+| `token`                | str    | Optional STS session token. |
+| `anon`                 | bool   | `True` for unauthenticated access to public buckets. |
+| `endpoint_url`         | str    | Custom endpoint (DigitalOcean Spaces, MinIO, Ceph, ...). Omit for AWS S3. |
+| `use_ssl`              | bool   | Default `True`. |
+| `client_kwargs`        | dict   | Extra kwargs for the boto3 client, e.g. `{"region_name": "eu-central-1"}`. |
+| `config_kwargs`        | dict   | Extra kwargs for `botocore.config.Config`. |
+| `s3_additional_kwargs` | dict   | Default kwargs added to every S3 request (e.g. `ACL`, `ServerSideEncryption`). |
+| `requester_pays`       | bool   | Default `False`. Set when accessing requester-pays buckets. |
+| `version_aware`        | bool   | Default `False`. Enable S3 versioning awareness. |
+| `relative_to_path`     | str    | Bucket name, optionally followed by a key prefix (e.g. `"my-bucket"` or `"my-bucket/uploads/2026"`). |
+
+There is **no** `bucket_name` parameter; the bucket lives inside the path
+that fsspec sees, so `relative_to_path` is the way to fix it per storage
+instance. See the full s3fs option list at
+<https://s3fs.readthedocs.io/en/latest/api.html#s3fs.core.S3FileSystem>.
+
+### `protocol="nested"` — `NestedFileSystem`
+
+| Key                    | Type             | Description |
+| ---------------------- | ---------------- | ----------- |
+| `path_storage_configs` | dict[str, dict]  | Mapping `prefix → storage_config`. The special key `"default"` is the fallback for paths that do not match any prefix. |
+
+Each value in the mapping is itself a `storage_config` (with its own
+`protocol`, `relative_to_path`, ...).
+
+### `protocol="transparent"` — `TransparentFileSystem`
+
+| Key              | Type                          | Description |
+| ---------------- | ----------------------------- | ----------- |
+| `transparent_fs` | dict / `AbstractFileSystem`   | Writable overlay; receives every write and is the primary read source. |
+| `base_fs`        | dict / `AbstractFileSystem`   | Read-only base layer queried when the overlay misses. |
+
+Either field may be either a pre-built fsspec object or a
+`storage_config` dict.
+
+### What `relative_to_path` does
+
+When you set `relative_to_path` in any `storage_config`,
+`get_filesystem` wraps the resulting filesystem in
+`fsspec.implementations.dirfs.DirFileSystem` rooted at that path
+(`django_fsspec/utils.py:60`). Every path passed to the filesystem
+afterwards is silently prefixed with this root.
+
+That transparency is exactly the point — it lets Django code stay
+oblivious to the bucket / directory the storage lives in — but it also
+explains why "you don't see much happen" when toggling it: the only
+visible effect is *where on the backend* objects end up.
+
+For S3 specifically:
+
+```python
+# Whole bucket as virtual root → storage.save("hello.txt", ...)
+# writes to s3://my-bucket/hello.txt
+"relative_to_path": "my-bucket"
+
+# Subdirectory inside a bucket → storage.save("hello.txt", ...)
+# writes to s3://my-bucket/uploads/2026/hello.txt
+"relative_to_path": "my-bucket/uploads/2026"
+```
+
+Without `relative_to_path` you would have to include the bucket (and any
+prefix) in every Django `name`, e.g.
+`storage.save("my-bucket/hello.txt", ...)` — rarely what you want.
+
+### Permissions and `on_collision`
+
+`FsspecStorage` exposes two layered access controls. Both can be set at
+the top-level `OPTIONS` (cover the whole storage) and inside any
+`storage_config` entry (cover one sub-fs in a `nested` setup). When both
+layers are set, the **most restrictive** combination wins — booleans
+combine with `AND`; `on_collision` is ranked
+`"raise" > "rename" > "overwrite"`.
+
+#### `permissions`
+
+```python
+"permissions": {
+    "allow_read":   True,   # _open(read), url_signed(GET), url_direct
+    "allow_write":  True,   # _save, _open(write), url_signed(PUT)
+    "allow_delete": True,   # delete
+}
+```
+
+A denied action raises Python's builtin `PermissionError` with a message
+that names the action, the path, and which key blocked it.
+
+#### `on_collision`
+
+What `_save` does when the target name already exists:
+
+| Value | Behavior |
+| --- | --- |
+| `"overwrite"` *(default)* | Replace the existing object. |
+| `"rename"` | Django's `Storage.save()` finds an alternative name via `get_available_name`. The original file is kept. |
+| `"raise"` | `PermissionError`. |
+
+`url_signed(method="PUT")` cannot enforce `on_collision` after the
+URL is handed out, so the check happens at issuance time: when the
+target already exists and `on_collision != "overwrite"`, the call
+refuses with `PermissionError`.
+
+#### Read-only sub-fs example
+
+```python
+"storage_config": {
+    "protocol": "nested",
+    "path_storage_configs": {
+        "upload": {
+            "protocol": "s3", ..., "relative_to_path": "uploads",
+        },
+        "archive": {
+            "protocol": "s3", ..., "relative_to_path": "archive",
+            "permissions": {"allow_write": False, "allow_delete": False},
+            "on_collision": "raise",
+        },
+    },
+}
+```
+
+Here `archive/...` paths are read-only and refuse overwrites; `upload/...`
+keeps the default permissive setup.
+
+#### Migrating from `allow_overwrite`
+
+`allow_overwrite` is deprecated. It still works (emits
+`DeprecationWarning`) and is mapped onto `on_collision`:
+
+| Old | New |
+| --- | --- |
+| `allow_overwrite=True` *(default)* | `on_collision="overwrite"` |
+| `allow_overwrite=False` | `on_collision="rename"` |
+
+Setting both `allow_overwrite` and `on_collision` together →
+`ImproperlyConfigured`.
 
 ## Presigned URLs and checksums
 
