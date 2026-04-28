@@ -203,14 +203,17 @@ class FsspecStorage(Storage):
             raise PermissionError(f"FsspecStorage permission denied: {action} {name!r} ({key}=False)")
 
     def is_name_available(self, name, max_length=None):
-        """Defer to ``on_collision`` instead of Django's rename loop.
+        """Defer to the *effective* ``on_collision`` for ``name``.
 
-        For ``on_collision`` ∈ {``"overwrite"``, ``"raise"``} the caller's
-        chosen name should hit ``_save`` verbatim so the collision policy
-        can be enforced there. Only ``"rename"`` keeps Django's standard
-        rename-if-taken behavior.
+        For ``"overwrite"`` and ``"raise"`` the caller's chosen name should
+        hit ``_save`` verbatim so the collision policy can be enforced
+        there. Only ``"rename"`` keeps Django's standard rename-if-taken
+        behavior. The effective value is resolved per path so that a
+        sub-filesystem inside a ``NestedFileSystem`` can pick a stricter
+        policy than the top-level storage (most-restrictive-wins).
         """
-        if self.on_collision == "rename":
+        _, effective = self._resolve_effective(name)
+        if effective == "rename":
             return super().is_name_available(name, max_length=max_length)
         if max_length and len(name) > max_length:
             return False

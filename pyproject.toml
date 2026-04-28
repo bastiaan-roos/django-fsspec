@@ -22,6 +22,8 @@ classifiers = [
   "Framework :: Django",
   "Framework :: Django :: 5.0",
   "Framework :: Django :: 5.1",
+  "Framework :: Django :: 5.2",
+  "Framework :: Django :: 6.0",
   "Intended Audience :: Developers",
   "Operating System :: OS Independent",
   "Programming Language :: Python",
@@ -35,7 +37,7 @@ dynamic = [
   "version",
 ]
 dependencies = [
-  "Django>=5.0",
+  "Django>=5.0,<7",
   "fsspec>=2025.2.0",
 ]
 
