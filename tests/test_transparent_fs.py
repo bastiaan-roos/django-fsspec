@@ -151,3 +151,44 @@ class TestTransparentFS(unittest.TestCase):
         Path(root_base_fs, "b.txt").write_bytes(b"base")
         Path(root_transparent_fs, "b.txt").write_bytes(b"overlay-longer")
         self.assertEqual(self.fs.size("b.txt"), len(b"overlay-longer"))
+
+    # --- contract edge cases --------------------------------------------------
+
+    def test_ls_missing_path_raises(self):
+        """fsspec contract: `ls` raises FileNotFoundError when neither
+        layer has the path. Previously the missing-path errors were
+        silently swallowed and an empty list was returned."""
+        with self.assertRaises(FileNotFoundError):
+            self.fs.ls("does/not/exist")
+
+    def test_ls_succeeds_when_only_one_layer_has_the_path(self):
+        Path(root_base_fs, "subdir").mkdir()
+        Path(root_base_fs, "subdir", "b.txt").write_bytes(b"x")
+        # Overlay does not have `subdir/`; ls must still return base content.
+        result = sorted(self.fs.ls("subdir", detail=False))
+        self.assertEqual(result, ["subdir/b.txt"])
+
+    def test_rm_directory_when_overlay_holds_only_tombstones(self):
+        """A directory whose entire content has been hidden via overlay
+        tombstones should remove cleanly: the overlay-side bookkeeping
+        files must be cleared and the directory must vanish from the
+        merged view."""
+        Path(root_base_fs, "ghost").mkdir()
+        Path(root_base_fs, "ghost", "g1.txt").write_bytes(b"g1")
+        Path(root_base_fs, "ghost", "g2.txt").write_bytes(b"g2")
+
+        # Hide both files via overlay tombstones.
+        self.fs.rm("ghost/g1.txt")
+        self.fs.rm("ghost/g2.txt")
+        # Merged view of ghost/ is empty.
+        self.assertEqual(list(self.fs.ls("ghost", detail=False)), [])
+
+        # Now rm the directory. Should not raise on the leftover overlay
+        # bookkeeping (g1.txt.deleted, g2.txt.deleted).
+        self.fs.rm("ghost")
+        self.assertFalse(self.fs.exists("ghost"))
+        # Overlay's stale tombstones are gone…
+        self.assertFalse(Path(root_transparent_fs, "ghost").exists())
+        # …but a new tombstone for the directory itself is recorded so the
+        # base directory does not reappear in the merged view.
+        self.assertTrue(Path(root_transparent_fs, "ghost.deleted").exists())

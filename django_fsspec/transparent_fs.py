@@ -205,17 +205,29 @@ class TransparentFileSystem(AbstractFileSystem):
             ``True`` (default) returns dict entries; ``False`` returns
             plain path strings (fsspec convention).
         """
-        # Always ask both layers for detail dicts so the tombstone /
+        # Always work in detail=True internally so the tombstone /
         # overlay-wins logic stays uniform; unwrap before returning.
-        base_by_name: dict[str, dict] = {}
-        if not self._has_replaced_ancestor(path):
-            try:
-                for entry in self.base_fs.ls(path, detail=True, **kwargs):
-                    base_by_name[entry["name"]] = entry
-            except FileNotFoundError:
-                pass
+        overlay_by_name, deleted, replaced, overlay_ok = self._read_overlay_listing(path, **kwargs)
+        base_by_name, base_ok = self._read_base_listing(path, **kwargs)
 
-        overlay_by_name: dict[str, dict] = {}
+        # Honor fsspec's contract: if neither layer has the path, raise.
+        # (When base was deliberately skipped because of a `.replaced`
+        # ancestor, an overlay miss still means the path is gone.)
+        if not overlay_ok and not base_ok:
+            raise FileNotFoundError(f"{path!r}: no such file or directory")
+
+        # Tombstones (and replacements) hide the base entry; overlay content wins.
+        for name in deleted | replaced:
+            base_by_name.pop(name, None)
+        base_by_name.update(overlay_by_name)
+
+        if detail:
+            return list(base_by_name.values())
+        return list(base_by_name)
+
+    def _read_overlay_listing(self, path, **kwargs) -> tuple[dict, set, set, bool]:
+        """Return (entries, deleted_names, replaced_names, succeeded) for the overlay."""
+        entries: dict[str, dict] = {}
         deleted: set[str] = set()
         replaced: set[str] = set()
         try:
@@ -226,18 +238,26 @@ class TransparentFileSystem(AbstractFileSystem):
                 elif name.endswith(".replaced"):
                     replaced.add(name[: -len(".replaced")])
                 else:
-                    overlay_by_name[name] = entry
+                    entries[name] = entry
         except FileNotFoundError:
-            pass
+            return entries, deleted, replaced, False
+        return entries, deleted, replaced, True
 
-        # Tombstones (and replacements) hide the base entry; overlay content wins.
-        for name in deleted | replaced:
-            base_by_name.pop(name, None)
-        base_by_name.update(overlay_by_name)
+    def _read_base_listing(self, path, **kwargs) -> tuple[dict, bool]:
+        """Return (entries, succeeded) for the base layer.
 
-        if detail:
-            return list(base_by_name.values())
-        return list(base_by_name)
+        When any ancestor of ``path`` was replaced via the overlay, the
+        base subtree is shadowed and not queried.
+        """
+        if self._has_replaced_ancestor(path):
+            return {}, False
+        entries: dict[str, dict] = {}
+        try:
+            for entry in self.base_fs.ls(path, detail=True, **kwargs):
+                entries[entry["name"]] = entry
+        except FileNotFoundError:
+            return entries, False
+        return entries, True
 
     def _has_replaced_ancestor(self, path: str) -> bool:
         """Return True when any proper ancestor of ``path`` was replaced."""
@@ -423,9 +443,12 @@ class TransparentFileSystem(AbstractFileSystem):
             raise FileNotFoundError(f"Cannot remove {path!r}: does not exist")
 
         # Empty-check only applies to directories. Files always remove.
-        if not recursive and self.isdir(path):
-            if list(self.ls(path, detail=False)):
+        merged_empty_dir = False
+        if self.isdir(path):
+            merged_empty = not list(self.ls(path, detail=False))
+            if not merged_empty and not recursive:
                 raise OSError(f"Directory not empty: {path!r}")
+            merged_empty_dir = merged_empty
 
         # Drop a stale .replaced marker if present for this path.
         replaced_marker = path + ".replaced"
@@ -436,8 +459,12 @@ class TransparentFileSystem(AbstractFileSystem):
                 self.transparent_fs.rm_file(replaced_marker)
 
         if ex.where == 0:
-            # Lives in the overlay — physically remove it there.
-            self.transparent_fs.rm(path, recursive=recursive)
+            # Physically remove from the overlay. When the merged view says
+            # the directory is empty but the overlay still holds tombstones
+            # for entries hidden from base, recurse into the overlay so
+            # those bookkeeping files go too.
+            overlay_recursive = recursive or merged_empty_dir
+            self.transparent_fs.rm(path, recursive=overlay_recursive)
             # If the base layer still has it, leave a tombstone so future
             # reads do not fall through to the (now stale) base copy.
             if self.base_fs.exists(path):
