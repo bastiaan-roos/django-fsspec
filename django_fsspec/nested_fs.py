@@ -6,6 +6,10 @@ from typing import TYPE_CHECKING
 from fsspec import AbstractFileSystem
 from fsspec import register_implementation
 
+from .permissions import DEFAULT_ON_COLLISION
+from .permissions import DEFAULT_PERMISSIONS
+from .permissions import normalize_on_collision
+from .permissions import normalize_permissions
 from .utils import get_filesystem
 from .utils import unwrap_s3_target
 
@@ -18,21 +22,21 @@ class NestedFileSystem(AbstractFileSystem):
 
     Args:
         path_storage_configs (dict): dictionary with path as key and storage configuration as value.
-            'default' path is the root path.
-            the format of the storage configuration is the same as the one used in fsspec.filesystem, with additional
-            settings for allow_overwrite, allow_delete, and allow_write.
-            Dictionary includes the following:
-            - fs or protocal: fsspec filesystem object / fsspec filesystem type
-            - relative_to_path: path to use as base path for the filesystem (fs will be wrapped in a DirFileSystem)
-            - nested_permissions (not implemented yet): dictionary with permissions for the nested filesystems
-                - allow_write: allow writing files (default is True)
-                - allow_overwrite: allow overwriting files (default is True)
-                - allow_delete: allow deleting files (default is True)
-            - **storage_options: are specific to the protocol being chosen, and are passed directly to the class.
+            The special key ``'default'`` is the fallback for paths that do not match any prefix.
+            Each value is itself a storage configuration:
+
+            - ``fs`` or ``protocol``: fsspec filesystem object / protocol name
+            - ``relative_to_path``: optional, wraps the fs in a DirFileSystem rooted at this path
+            - ``permissions``: optional dict with ``allow_read`` / ``allow_write`` /
+              ``allow_delete`` (default ``True`` each); enforced by the wrapping
+              ``FsspecStorage`` (most-restrictive-wins against the top-level permissions)
+            - ``on_collision``: optional, one of ``"overwrite"`` / ``"rename"`` /
+              ``"raise"`` (default ``"overwrite"``)
+            - any other keys: forwarded to ``fsspec.filesystem(protocol, ...)``.
 
     Example:
 
-    fs_nested = NestedPathFileSystem(
+    fs_nested = NestedFileSystem(
         path_storage_configs={
             # root path is mapped to a local directory
             'default': {
@@ -42,26 +46,23 @@ class NestedFileSystem(AbstractFileSystem):
             # directory 'a' is mapped to a local directory, read only
             'a': {
                 'fs': fsspec.filesystem('file'),
-                'nested_permissions': {
-                    'allow_write': False
-                    'allow_overwrite': False,
+                'permissions': {
+                    'allow_write': False,
                     'allow_delete': False,
-                }
+                },
+                'on_collision': 'raise',
             },
             # directory 'b' is mapped to a s3 bucket
             'b': {
-                'fs': 's3',
+                'protocol': 's3',
                 'endpoint_url': 'https://ams3.digitaloceanspaces.com',
-                'access_key': 'my-access-key',
-                'secret_key: "",
+                'key': 'my-access-key',
+                'secret': '...',
                 'relative_to_path': 'my-bucket',  # use bucket name here
-                },
             },
         }
     )
     """
-
-    # todo: implement nested_permissions
 
     protocol = "nested"
 
@@ -69,17 +70,35 @@ class NestedFileSystem(AbstractFileSystem):
         super().__init__(**storage_options)
         self.file_systems = {}
         self.permissions = {}
+        self.on_collision = {}
         for path, storage_config_orig in path_storage_configs.items():
-            storage_config = storage_config_orig.copy()
-            permissions = storage_config.pop("nested_permissions", {})
-            self.permissions[path] = {
-                "allow_write": permissions.get("allow_write", True),
-                "allow_overwrite": permissions.get("allow_overwrite", True),
-                "allow_delete": permissions.get("allow_delete", True),
-            }
+            storage_config = dict(storage_config_orig)
+            self.permissions[path] = normalize_permissions(storage_config.pop("permissions", None))
+            self.on_collision[path] = normalize_on_collision(storage_config.pop("on_collision", None))
             self.file_systems[path] = get_filesystem(**storage_config)
         # fsid is hash of the storage configurations
         self._fsid = hash(json.dumps(path_storage_configs, default=str))
+
+    def permissions_for(self, path: str) -> tuple[dict, str]:
+        """Return ``(permissions, on_collision)`` for the sub-fs handling ``path``.
+
+        Parameters
+        ----------
+        path : str
+            Path in nested notation (e.g. ``'video/foo.mp4'``).
+
+        Returns
+        -------
+        tuple of (dict, str)
+            The sub-fs permissions dict and on_collision value, or the
+            ``'default'`` entry when the path falls through, or all-``True``
+            permissions and ``"overwrite"`` when no sub-fs matches at all.
+        """
+        fs, root_path, _ = self._get_filesystem(path)
+        if fs is None:
+            return dict(DEFAULT_PERMISSIONS), DEFAULT_ON_COLLISION
+        key = root_path if root_path else "default"
+        return self.permissions[key], self.on_collision[key]
 
     @property
     def fsid(self):

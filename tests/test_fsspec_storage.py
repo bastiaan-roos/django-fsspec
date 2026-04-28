@@ -1,9 +1,11 @@
 import os
 import shutil
+import warnings
 from pathlib import Path
 
 import django
 from django.conf import settings
+from django.core.exceptions import ImproperlyConfigured
 from django.core.files.base import ContentFile
 from django.core.files.storage import storages
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -31,6 +33,11 @@ settings.configure(
         "default": {
             "BACKEND": "django_fsspec.FsspecStorage",
             "OPTIONS": {
+                # Tests in this fixture rely on the rename-on-collision
+                # behavior (test_functions_part_two checks that a duplicate
+                # save returns a unique name). The package default is
+                # `overwrite`, so we make it explicit here.
+                "on_collision": "rename",
                 "storage_config": {
                     "protocol": "dir",
                     "path": test_data_dir,
@@ -136,3 +143,300 @@ class TestFsspecStorage(TestCase):
         }
         response = client.post(url, data, format="multipart")
         self.assertEqual(response.status_code, 200)
+
+
+class TestOptionsValidation(TestCase):
+    """Validate FsspecStorage option handling and per-protocol checks."""
+
+    def test_location_maps_to_relative_to_path_for_file_protocol(self):
+        """OPTIONS['location'] is forwarded to storage_config['relative_to_path']
+        for the local filesystem protocol, and a save lands under that path."""
+        from django_fsspec import FsspecStorage
+
+        loc = test_data_dir / "loc_via_option"
+        os.makedirs(loc, exist_ok=True)
+        try:
+            storage = FsspecStorage(
+                location=str(loc),
+                storage_config={"protocol": "file", "auto_mkdir": True},
+            )
+            storage.save("hello.txt", ContentFile(b"hi"))
+            self.assertTrue((loc / "hello.txt").exists())
+        finally:
+            shutil.rmtree(loc, ignore_errors=True)
+
+    def test_location_with_non_file_protocol_raises(self):
+        """OPTIONS['location'] + non-file protocol → ImproperlyConfigured."""
+        from django_fsspec import FsspecStorage
+
+        with self.assertRaises(ImproperlyConfigured) as ctx:
+            FsspecStorage(
+                location="/tmp/whatever",
+                storage_config={
+                    "protocol": "s3",
+                    "key": "x",
+                    "secret": "y",
+                    "relative_to_path": "my-bucket",
+                },
+            )
+        self.assertIn("location", str(ctx.exception))
+
+    def test_location_and_relative_to_path_conflict_raises(self):
+        """OPTIONS['location'] together with storage_config['relative_to_path']
+        on the same level is ambiguous → ImproperlyConfigured."""
+        from django_fsspec import FsspecStorage
+
+        with self.assertRaises(ImproperlyConfigured):
+            FsspecStorage(
+                location="/tmp/a",
+                storage_config={
+                    "protocol": "file",
+                    "auto_mkdir": True,
+                    "relative_to_path": "/tmp/b",
+                },
+            )
+
+    def test_file_permissions_mode_emits_deprecation_warning(self):
+        """file_permissions_mode is accepted but unused → DeprecationWarning."""
+        from django_fsspec import FsspecStorage
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            FsspecStorage(
+                file_permissions_mode=0o644,
+                storage_config={"protocol": "file", "auto_mkdir": True},
+            )
+        messages = [str(w.message) for w in caught if issubclass(w.category, DeprecationWarning)]
+        self.assertTrue(any("file_permissions_mode" in m for m in messages), messages)
+
+    def test_directory_permissions_mode_emits_deprecation_warning(self):
+        from django_fsspec import FsspecStorage
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            FsspecStorage(
+                directory_permissions_mode=0o755,
+                storage_config={"protocol": "file", "auto_mkdir": True},
+            )
+        messages = [str(w.message) for w in caught if issubclass(w.category, DeprecationWarning)]
+        self.assertTrue(any("directory_permissions_mode" in m for m in messages), messages)
+
+    def test_s3_protocol_requires_relative_to_path(self):
+        """protocol='s3' without relative_to_path → ImproperlyConfigured."""
+        from django_fsspec import FsspecStorage
+
+        with self.assertRaises(ImproperlyConfigured) as ctx:
+            FsspecStorage(
+                storage_config={
+                    "protocol": "s3",
+                    "key": "x",
+                    "secret": "y",
+                },
+            )
+        self.assertIn("relative_to_path", str(ctx.exception))
+
+    def test_nested_protocol_requires_path_storage_configs(self):
+        from django_fsspec import FsspecStorage
+
+        with self.assertRaises(ImproperlyConfigured) as ctx:
+            FsspecStorage(storage_config={"protocol": "nested"})
+        self.assertIn("path_storage_configs", str(ctx.exception))
+
+    def test_transparent_protocol_requires_both_layers(self):
+        from django_fsspec import FsspecStorage
+
+        with self.assertRaises(ImproperlyConfigured) as ctx:
+            FsspecStorage(storage_config={"protocol": "transparent"})
+        msg = str(ctx.exception)
+        self.assertIn("transparent_fs", msg)
+        self.assertIn("base_fs", msg)
+
+    def test_nested_validates_sub_configs_recursively(self):
+        """A nested config with an S3 sub-fs lacking relative_to_path also
+        raises — validation is applied recursively via get_filesystem."""
+        from django_fsspec import FsspecStorage
+
+        with self.assertRaises(ImproperlyConfigured) as ctx:
+            FsspecStorage(
+                storage_config={
+                    "protocol": "nested",
+                    "path_storage_configs": {
+                        "upload": {
+                            "protocol": "s3",
+                            "key": "x",
+                            "secret": "y",
+                            # no relative_to_path → must raise
+                        },
+                    },
+                },
+            )
+        self.assertIn("relative_to_path", str(ctx.exception))
+
+
+class TestPermissionsAndCollision(TestCase):
+    """Verify permissions, on_collision, and the AND-merge with sub-fs perms."""
+
+    def setUp(self):
+        self.tmp = test_data_dir / "perm_tests"
+        os.makedirs(self.tmp, exist_ok=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _flat_storage(self, **opts):
+        from django_fsspec import FsspecStorage
+
+        return FsspecStorage(
+            storage_config={
+                "protocol": "file",
+                "auto_mkdir": True,
+                "relative_to_path": str(self.tmp),
+            },
+            **opts,
+        )
+
+    # --- top-level permissions -------------------------------------------------
+
+    def test_allow_read_false_blocks_open(self):
+        storage = self._flat_storage(permissions={"allow_read": False})
+        (self.tmp / "x.txt").write_bytes(b"hi")
+        with self.assertRaises(PermissionError) as ctx:
+            storage.open("x.txt")
+        self.assertIn("read", str(ctx.exception))
+
+    def test_allow_write_false_blocks_save(self):
+        storage = self._flat_storage(permissions={"allow_write": False})
+        with self.assertRaises(PermissionError) as ctx:
+            storage.save("x.txt", ContentFile(b"hi"))
+        self.assertIn("write", str(ctx.exception))
+
+    def test_allow_delete_false_blocks_delete(self):
+        storage = self._flat_storage(permissions={"allow_delete": False})
+        (self.tmp / "x.txt").write_bytes(b"hi")
+        with self.assertRaises(PermissionError) as ctx:
+            storage.delete("x.txt")
+        self.assertIn("delete", str(ctx.exception))
+
+    def test_unknown_permission_key_raises(self):
+        with self.assertRaises(ImproperlyConfigured):
+            self._flat_storage(permissions={"allow_chown": False})
+
+    # --- on_collision ----------------------------------------------------------
+
+    def test_on_collision_overwrite_replaces_content(self):
+        storage = self._flat_storage()  # default = overwrite
+        storage.save("x.txt", ContentFile(b"v1"))
+        name2 = storage.save("x.txt", ContentFile(b"v2"))
+        self.assertEqual(name2, "x.txt")
+        self.assertEqual(storage.open("x.txt").read(), b"v2")
+
+    def test_on_collision_rename_keeps_both(self):
+        storage = self._flat_storage(on_collision="rename")
+        storage.save("x.txt", ContentFile(b"v1"))
+        name2 = storage.save("x.txt", ContentFile(b"v2"))
+        self.assertNotEqual(name2, "x.txt")
+        self.assertEqual(storage.open("x.txt").read(), b"v1")
+        self.assertEqual(storage.open(name2).read(), b"v2")
+
+    def test_on_collision_raise_blocks_overwrite(self):
+        storage = self._flat_storage(on_collision="raise")
+        storage.save("x.txt", ContentFile(b"v1"))
+        with self.assertRaises(PermissionError) as ctx:
+            storage.save("x.txt", ContentFile(b"v2"))
+        self.assertIn("already exists", str(ctx.exception))
+
+    def test_invalid_on_collision_raises(self):
+        with self.assertRaises(ImproperlyConfigured):
+            self._flat_storage(on_collision="ignore")
+
+    # --- backwards-compat for allow_overwrite ----------------------------------
+
+    def test_allow_overwrite_true_emits_deprecation_and_maps_to_overwrite(self):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            storage = self._flat_storage(allow_overwrite=True)
+        self.assertEqual(storage.on_collision, "overwrite")
+        self.assertTrue(
+            any(issubclass(w.category, DeprecationWarning) and "allow_overwrite" in str(w.message) for w in caught)
+        )
+
+    def test_allow_overwrite_false_maps_to_rename(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            storage = self._flat_storage(allow_overwrite=False)
+        self.assertEqual(storage.on_collision, "rename")
+
+    def test_allow_overwrite_and_on_collision_together_raises(self):
+        with self.assertRaises(ImproperlyConfigured):
+            self._flat_storage(allow_overwrite=True, on_collision="overwrite")
+
+    # --- nested: per-sub-fs permissions and most-restrictive-wins -------------
+
+    def _nested_storage(self, top_permissions=None, top_collision=None, sub_permissions=None, sub_collision=None):
+        from django_fsspec import FsspecStorage
+
+        sub_a_root = self.tmp / "sub_a"
+        sub_def_root = self.tmp / "sub_def"
+        os.makedirs(sub_a_root, exist_ok=True)
+        os.makedirs(sub_def_root, exist_ok=True)
+
+        sub_a_cfg = {
+            "protocol": "file",
+            "auto_mkdir": True,
+            "relative_to_path": str(sub_a_root),
+        }
+        if sub_permissions is not None:
+            sub_a_cfg["permissions"] = sub_permissions
+        if sub_collision is not None:
+            sub_a_cfg["on_collision"] = sub_collision
+
+        opts = {
+            "storage_config": {
+                "protocol": "nested",
+                "path_storage_configs": {
+                    "a": sub_a_cfg,
+                    "default": {
+                        "protocol": "file",
+                        "auto_mkdir": True,
+                        "relative_to_path": str(sub_def_root),
+                    },
+                },
+            },
+        }
+        if top_permissions is not None:
+            opts["permissions"] = top_permissions
+        if top_collision is not None:
+            opts["on_collision"] = top_collision
+        return FsspecStorage(**opts)
+
+    def test_nested_sub_permission_blocks_only_that_prefix(self):
+        storage = self._nested_storage(sub_permissions={"allow_write": False})
+        # Sub-fs 'a' is read-only.
+        with self.assertRaises(PermissionError):
+            storage.save("a/x.txt", ContentFile(b"hi"))
+        # Default sub-fs is unaffected.
+        name = storage.save("free.txt", ContentFile(b"hi"))
+        self.assertEqual(name, "free.txt")
+
+    def test_nested_top_permission_blocks_all(self):
+        storage = self._nested_storage(top_permissions={"allow_write": False})
+        with self.assertRaises(PermissionError):
+            storage.save("a/x.txt", ContentFile(b"hi"))
+        with self.assertRaises(PermissionError):
+            storage.save("free.txt", ContentFile(b"hi"))
+
+    def test_nested_most_restrictive_wins_for_collision(self):
+        # Top says overwrite, sub says raise → effective = raise.
+        storage = self._nested_storage(top_collision="overwrite", sub_collision="raise")
+        storage.save("a/x.txt", ContentFile(b"v1"))
+        with self.assertRaises(PermissionError) as ctx:
+            storage.save("a/x.txt", ContentFile(b"v2"))
+        self.assertIn("already exists", str(ctx.exception))
+        # Default sub-fs inherits top's overwrite.
+        storage.save("y.txt", ContentFile(b"v1"))
+        storage.save("y.txt", ContentFile(b"v2"))  # no raise
+        self.assertEqual(storage.open("y.txt").read(), b"v2")
+
+    def test_nested_unknown_sub_permission_key_raises(self):
+        with self.assertRaises(ImproperlyConfigured):
+            self._nested_storage(sub_permissions={"allow_chown": False})
