@@ -4,67 +4,19 @@ import warnings
 from pathlib import Path
 
 import django
-from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from django.core.files.base import ContentFile
 from django.core.files.storage import storages
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.core.management import call_command
 from django.test import Client
 from django.test import TestCase
 from django.urls import reverse
 
+# Django settings are configured in tests/conftest.py.
 test_data_dir = Path(Path(__file__).parent, "tmp")
-# Make sure Django settings are configured.
-
-settings.configure(
-    DEBUG=True,
-    INSTALLED_APPS=[
-        "test_app",
-    ],
-    ROOT_URLCONF="urls",
-    DATABASES={
-        "default": {
-            "ENGINE": "django.db.backends.sqlite3",
-            "NAME": ":memory:",
-        }
-    },
-    STORAGES={
-        "default": {
-            "BACKEND": "django_fsspec.FsspecStorage",
-            "OPTIONS": {
-                # Tests in this fixture rely on the rename-on-collision
-                # behavior (test_functions_part_two checks that a duplicate
-                # save returns a unique name). The package default is
-                # `overwrite`, so we make it explicit here.
-                "on_collision": "rename",
-                "storage_config": {
-                    "protocol": "dir",
-                    "path": test_data_dir,
-                    "target_protocol": "local",
-                    "target_options": {
-                        "auto_mkdir": True,  # make directories if they do not exist
-                    },
-                },
-            },
-        }
-    },
-)
-
-django.setup()
-call_command("migrate", "--run-syncdb", verbosity=0)
-
-
-# test as django app# from django.core.files.storage import Storage
 
 
 class TestFsspecStorage(TestCase):
-    # settings_module = 'django-fsspec.tests.test_site.project.settings'
-    @classmethod
-    def setUpClass(cls):
-        super().setUpClass()
-        # Initialize Django
-
     def setUp(self):
         os.makedirs(test_data_dir, exist_ok=True)
         # os.makedirs(test_data_dir / "test", exist_ok=True)
@@ -440,3 +392,182 @@ class TestPermissionsAndCollision(TestCase):
     def test_nested_unknown_sub_permission_key_raises(self):
         with self.assertRaises(ImproperlyConfigured):
             self._nested_storage(sub_permissions={"allow_chown": False})
+
+    def test_nested_most_restrictive_wins_overwrite_vs_rename(self):
+        """top=overwrite, sub=rename -> effective=rename for that sub-fs."""
+        storage = self._nested_storage(top_collision="overwrite", sub_collision="rename")
+        storage.save("a/x.txt", ContentFile(b"v1"))
+        # Sub-fs uses 'rename' on collision -> Django's get_available_name
+        # finds an alternative name; both files coexist.
+        name2 = storage.save("a/x.txt", ContentFile(b"v2"))
+        self.assertNotEqual(name2, "a/x.txt")
+        self.assertTrue(storage.exists("a/x.txt"))
+        self.assertTrue(storage.exists(name2))
+
+
+class TestStorageContractDetails(TestCase):
+    """Direct unit tests for small contract surfaces (path/name/availability)."""
+
+    def setUp(self):
+        self.tmp = test_data_dir / "contract_tests"
+        os.makedirs(self.tmp, exist_ok=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _storage(self, **opts):
+        from django_fsspec import FsspecStorage
+
+        return FsspecStorage(
+            storage_config={
+                "protocol": "file",
+                "auto_mkdir": True,
+                "relative_to_path": str(self.tmp),
+            },
+            **opts,
+        )
+
+    def test_path_raises_not_implemented(self):
+        """`storage.path(name)` is contractually invalid for non-local backends."""
+        storage = self._storage()
+        with self.assertRaises(NotImplementedError):
+            storage.path("anything.txt")
+
+    def test_get_alternative_name_appends_random_suffix(self):
+        storage = self._storage()
+        alt = storage.get_alternative_name("foo", ".txt")
+        self.assertTrue(alt.startswith("foo_"))
+        self.assertTrue(alt.endswith(".txt"))
+        # 7 random alphanumeric chars between "foo_" and ".txt"
+        suffix_part = alt[len("foo_") : -len(".txt")]
+        self.assertEqual(len(suffix_part), 7)
+        self.assertTrue(suffix_part.isalnum())
+
+    def test_is_name_available_overwrite_returns_true_even_when_exists(self):
+        storage = self._storage(on_collision="overwrite")
+        (self.tmp / "x.txt").write_bytes(b"hi")
+        self.assertTrue(storage.is_name_available("x.txt"))
+
+    def test_is_name_available_raise_returns_true_so_save_can_decide(self):
+        storage = self._storage(on_collision="raise")
+        (self.tmp / "x.txt").write_bytes(b"hi")
+        self.assertTrue(storage.is_name_available("x.txt"))
+
+    def test_is_name_available_rename_uses_django_default(self):
+        storage = self._storage(on_collision="rename")
+        (self.tmp / "x.txt").write_bytes(b"hi")
+        # Existing name is not available -> rename loop kicks in.
+        self.assertFalse(storage.is_name_available("x.txt"))
+        # Free name remains available.
+        self.assertTrue(storage.is_name_available("y.txt"))
+
+    def test_is_name_available_max_length_enforced_for_overwrite(self):
+        """Even when on_collision short-circuits the existence check, names
+        that exceed `max_length` must still be reported unavailable so
+        Django's save flow can truncate."""
+        storage = self._storage(on_collision="overwrite")
+        long_name = "a" * 50
+        self.assertTrue(storage.is_name_available(long_name, max_length=100))
+        self.assertFalse(storage.is_name_available(long_name, max_length=10))
+
+    def test_allow_overwrite_is_derived_from_on_collision(self):
+        """`storage.allow_overwrite` is read-only and derived from on_collision."""
+        self.assertTrue(self._storage(on_collision="overwrite").allow_overwrite)
+        self.assertTrue(self._storage(on_collision="raise").allow_overwrite)
+        self.assertFalse(self._storage(on_collision="rename").allow_overwrite)
+
+
+class TestUrlSignedCollisionPreCheck(TestCase):
+    """Verify the on_collision pre-check on `url_signed(method='PUT')` fires
+    before the S3 plumbing — so it can be tested without real S3 credentials.
+    """
+
+    def setUp(self):
+        self.tmp = test_data_dir / "url_signed_tests"
+        os.makedirs(self.tmp, exist_ok=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _storage(self, **opts):
+        from django_fsspec import FsspecStorage
+
+        return FsspecStorage(
+            storage_config={
+                "protocol": "file",
+                "auto_mkdir": True,
+                "relative_to_path": str(self.tmp),
+            },
+            **opts,
+        )
+
+    def test_put_with_on_collision_raise_blocks_when_target_exists(self):
+        storage = self._storage(on_collision="raise")
+        (self.tmp / "x.txt").write_bytes(b"hi")
+        with self.assertRaises(PermissionError) as ctx:
+            storage.url_signed("x.txt", method="PUT")
+        msg = str(ctx.exception)
+        self.assertIn("on_collision", msg)
+        self.assertIn("'raise'", msg)
+
+    def test_put_with_on_collision_rename_blocks_when_target_exists(self):
+        """`rename` cannot be honored over presigned URLs (the URL is opaque)."""
+        storage = self._storage(on_collision="rename")
+        (self.tmp / "x.txt").write_bytes(b"hi")
+        with self.assertRaises(PermissionError):
+            storage.url_signed("x.txt", method="PUT")
+
+    def test_put_allow_write_false_blocks_before_collision_check(self):
+        storage = self._storage(permissions={"allow_write": False})
+        with self.assertRaises(PermissionError) as ctx:
+            storage.url_signed("anything.txt", method="PUT")
+        self.assertIn("write", str(ctx.exception))
+
+
+class TestVerifyChecksum(TestCase):
+    """Unit-test the verify_checksum path without needing real S3."""
+
+    def setUp(self):
+        self.tmp = test_data_dir / "checksum_tests"
+        os.makedirs(self.tmp, exist_ok=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _storage(self, **opts):
+        from django_fsspec import FsspecStorage
+
+        return FsspecStorage(
+            verify_checksum=True,
+            storage_config={
+                "protocol": "file",
+                "auto_mkdir": True,
+                "relative_to_path": str(self.tmp),
+            },
+            **opts,
+        )
+
+    def test_save_without_source_checksum_is_noop(self):
+        storage = self._storage()
+        storage.save("x.txt", ContentFile(b"hi"))
+        self.assertTrue(storage.exists("x.txt"))
+
+    def test_save_with_matching_checksum_succeeds(self):
+        storage = self._storage()
+        # Force the underlying fs to report a known checksum.
+        storage.filesystem.checksum = lambda name: "abc123"
+        content = ContentFile(b"hi")
+        content.checksum = "abc123"
+        storage._save("x.txt", content)
+        self.assertTrue(storage.exists("x.txt"))
+
+    def test_save_with_mismatched_checksum_raises_and_cleans_up(self):
+        storage = self._storage()
+        storage.filesystem.checksum = lambda name: "actually-stored"
+        content = ContentFile(b"hi")
+        content.checksum = "expected-but-wrong"
+        with self.assertRaises(IOError) as ctx:
+            storage._save("x.txt", content)
+        self.assertIn("Checksum mismatch", str(ctx.exception))
+        # Cleanup: object must not be left behind.
+        self.assertFalse(storage.exists("x.txt"))

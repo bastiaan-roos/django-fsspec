@@ -39,23 +39,34 @@ class TransparentFileSystem(AbstractFileSystem):
     Examples:
 
 
-    fs_nested = TransparentFileSystem(
-        transparent_fs=fsspec.filesystem("file", {"auto_mkdir": True})
+    fs = TransparentFileSystem(
+        transparent_fs={
+            "protocol": "file",
+            "auto_mkdir": True,
+            "relative_to_path": "/tmp/dev-cache",
+        },
         base_fs={
-            "protocol": "dir",
-            "path": "/tmp",
-            "target_fs": "file",
-            "target_options": {"auto_mkdir": True},
-        );
-    """
+            "protocol": "s3",
+            "key": "...",
+            "secret": "...",
+            "endpoint_url": "...",
+            "relative_to_path": "production-bucket",
+        },
+    )
 
-    """
-    Implementation details:
-    - for deleted file or directory, create a file or directory with the name <name>.deleted
-    - for replaced (or recreated) directory, create a directory with the name <name>.replaced
+    Implementation notes
+    --------------------
+    Deletions and replacements through the overlay are recorded as
+    sentinel entries on the transparent filesystem:
 
+    - ``<name>.deleted`` — touched when ``<name>`` exists in the base
+      layer and was removed via the overlay. Future reads should not
+      fall through to the base for that path.
+    - ``<name>.replaced`` — touched when ``<name>`` (a directory) was
+      removed and re-created through the overlay. Anything beneath that
+      ancestor must come from the overlay only; the base subtree is
+      hidden.
     """
-    # todo: implement deleted paths and files
 
     protocol = "transparent"
 
@@ -155,7 +166,7 @@ class TransparentFileSystem(AbstractFileSystem):
             # check in base directory if parent directory exists
             parent = str(Path(path).parent)
             if self.base_fs.isdir(parent):
-                self.transparent_fs.mkdirs(parent)
+                self.transparent_fs.makedirs(parent, exist_ok=True)
         return
 
     def mkdir(self, path, *args, **kwargs):
@@ -164,7 +175,7 @@ class TransparentFileSystem(AbstractFileSystem):
 
     def makedirs(self, path, exist_ok=False):
         self.__pre_mkdir(path, exist_ok)
-        return self.transparent_fs.mkdirs(path, exist_ok)
+        return self.transparent_fs.makedirs(path, exist_ok=exist_ok)
 
     def rmdir(self, path):
         # for deleted files and directories, keep track of them by creating a file or directory
@@ -177,21 +188,85 @@ class TransparentFileSystem(AbstractFileSystem):
             return self.transparent_fs.rmdir(path)
 
     def ls(self, path, detail=True, **kwargs):
-        out = {item["name"]: item for item in self.base_fs.ls(path, detail=detail, **kwargs)}
-        for item in self.transparent_fs.ls(path, detail=detail, **kwargs):
-            if item.endswith(".deleted"):
-                del out[item[:-8]]
-            elif item.endswith(".replaced"):
-                out[item[:-9]] = {
-                    "name": item[:-9],
-                    "type": "directory",
-                    "size": 0,
-                    "created": 0,
-                    "modified": 0,
-                }
-            else:
-                out[item] = item
-        return out.values()
+        """List entries under ``path``, merging the overlay over the base.
+
+        - Tombstones (``<name>.deleted``) hide the matching entry from the
+          base view.
+        - Replacement markers (``<name>.replaced``) likewise hide the base
+          entry; the replacement content lives next to the marker on the
+          overlay and is returned via the overlay listing.
+        - When any ancestor of ``path`` carries a ``.replaced`` marker the
+          base subtree is fully shadowed, so ``base_fs.ls`` is skipped.
+
+        Parameters
+        ----------
+        path : str
+        detail : bool
+            ``True`` (default) returns dict entries; ``False`` returns
+            plain path strings (fsspec convention).
+        """
+        # Always work in detail=True internally so the tombstone /
+        # overlay-wins logic stays uniform; unwrap before returning.
+        overlay_by_name, deleted, replaced, overlay_ok = self._read_overlay_listing(path, **kwargs)
+        base_by_name, base_ok = self._read_base_listing(path, **kwargs)
+
+        # Honor fsspec's contract: if neither layer has the path, raise.
+        # (When base was deliberately skipped because of a `.replaced`
+        # ancestor, an overlay miss still means the path is gone.)
+        if not overlay_ok and not base_ok:
+            raise FileNotFoundError(f"{path!r}: no such file or directory")
+
+        # Tombstones (and replacements) hide the base entry; overlay content wins.
+        for name in deleted | replaced:
+            base_by_name.pop(name, None)
+        base_by_name.update(overlay_by_name)
+
+        if detail:
+            return list(base_by_name.values())
+        return list(base_by_name)
+
+    def _read_overlay_listing(self, path, **kwargs) -> tuple[dict, set, set, bool]:
+        """Return (entries, deleted_names, replaced_names, succeeded) for the overlay."""
+        entries: dict[str, dict] = {}
+        deleted: set[str] = set()
+        replaced: set[str] = set()
+        try:
+            for entry in self.transparent_fs.ls(path, detail=True, **kwargs):
+                name = entry["name"]
+                if name.endswith(".deleted"):
+                    deleted.add(name[: -len(".deleted")])
+                elif name.endswith(".replaced"):
+                    replaced.add(name[: -len(".replaced")])
+                else:
+                    entries[name] = entry
+        except FileNotFoundError:
+            return entries, deleted, replaced, False
+        return entries, deleted, replaced, True
+
+    def _read_base_listing(self, path, **kwargs) -> tuple[dict, bool]:
+        """Return (entries, succeeded) for the base layer.
+
+        When any ancestor of ``path`` was replaced via the overlay, the
+        base subtree is shadowed and not queried.
+        """
+        if self._has_replaced_ancestor(path):
+            return {}, False
+        entries: dict[str, dict] = {}
+        try:
+            for entry in self.base_fs.ls(path, detail=True, **kwargs):
+                entries[entry["name"]] = entry
+        except FileNotFoundError:
+            return entries, False
+        return entries, True
+
+    def _has_replaced_ancestor(self, path: str) -> bool:
+        """Return True when any proper ancestor of ``path`` was replaced."""
+        parts = [p for p in path.split("/") if p]
+        for i in range(1, len(parts)):
+            ancestor = "/".join(parts[:i])
+            if self.transparent_fs.exists(ancestor + ".replaced"):
+                return True
+        return False
 
     def walk(self, path, maxdepth=None, **kwargs):  # noqa: C901, PLR0912
         # zip values of transparent_fs and base_fs
@@ -308,12 +383,12 @@ class TransparentFileSystem(AbstractFileSystem):
 
     def put_file(self, lpath, rpath, *args, **kwargs):
         # make directory to make sure all flags are correct
-        self.mkdirs(str(Path(rpath).parent), exist_ok=True)
+        self.makedirs(str(Path(rpath).parent), exist_ok=True)
         return self.transparent_fs.put_file(lpath, rpath, *args, **kwargs)
 
     def put(self, lpath, rpath, *args, **kwargs):
         # make directory to make sure all flags are correct
-        self.mkdirs(str(Path(rpath).parent), exist_ok=True)
+        self.makedirs(str(Path(rpath).parent), exist_ok=True)
         return self.transparent_fs.put(lpath, rpath, *args, **kwargs)
 
     def head(self, path, size=1024):
@@ -360,36 +435,42 @@ class TransparentFileSystem(AbstractFileSystem):
             return True
 
     def rm(self, path, recursive=False, maxdepth=None):
-        # todo: check with maxdepth
         if maxdepth is not None:
             raise NotImplementedError("maxdepth is not implemented yet")
 
-        if not recursive:
-            # check if directory or file exists
-            if not self.exists(path):
-                raise ValueError("Cannot remove file or directory")
-            # check if directory is empty
-            subdirs, files = self.ls(path)
-            if subdirs or files:
-                raise ValueError("Cannot remove directory. Directory is not empty")
-
         ex = self._check_exists_and_where(path)
         if not ex.exists:
-            raise FileNotFoundError("Cannot remove file or directory")
+            raise FileNotFoundError(f"Cannot remove {path!r}: does not exist")
 
-        # remove .replaced if exists
-        if self.transparent_fs.exists(path + ".replaced"):
-            self.transparent_fs.rmdir(path + ".replaced")
+        # Empty-check only applies to directories. Files always remove.
+        merged_empty_dir = False
+        if self.isdir(path):
+            merged_empty = not list(self.ls(path, detail=False))
+            if not merged_empty and not recursive:
+                raise OSError(f"Directory not empty: {path!r}")
+            merged_empty_dir = merged_empty
+
+        # Drop a stale .replaced marker if present for this path.
+        replaced_marker = path + ".replaced"
+        if self.transparent_fs.exists(replaced_marker):
+            if self.transparent_fs.isdir(replaced_marker):
+                self.transparent_fs.rmdir(replaced_marker)
+            else:
+                self.transparent_fs.rm_file(replaced_marker)
 
         if ex.where == 0:
-            # remove from directory
-            self.transparent_fs.rm(path, recursive, maxdepth=maxdepth)
-            # check if directory exists in base_fs
+            # Physically remove from the overlay. When the merged view says
+            # the directory is empty but the overlay still holds tombstones
+            # for entries hidden from base, recurse into the overlay so
+            # those bookkeeping files go too.
+            overlay_recursive = recursive or merged_empty_dir
+            self.transparent_fs.rm(path, recursive=overlay_recursive)
+            # If the base layer still has it, leave a tombstone so future
+            # reads do not fall through to the (now stale) base copy.
             if self.base_fs.exists(path):
-                # create a file with .deleted flag
                 self.transparent_fs.touch(path + ".deleted")
         else:
-            # write .deleted flag
+            # Lives only in the base layer — record a tombstone.
             self.transparent_fs.touch(path + ".deleted")
         return True
 
@@ -397,7 +478,7 @@ class TransparentFileSystem(AbstractFileSystem):
         parent = str(Path(path).parent)
         if "w" in method:
             # make sure directory exists
-            self.transparent_fs.mkdirs(parent, exist_ok=True)
+            self.transparent_fs.makedirs(parent, exist_ok=True)
             return self.transparent_fs
         elif "a" in method:
             # check if first copy is required
@@ -409,7 +490,7 @@ class TransparentFileSystem(AbstractFileSystem):
                 # copy file to transparent_fs
                 if ex.where == 1:
                     # copy file to transparent_fs
-                    self.transparent_fs.mkdirs(parent, exist_ok=True)
+                    self.transparent_fs.makedirs(parent, exist_ok=True)
                     self.cp_file(path, path)
             return self.transparent_fs
         elif "r" in method:
@@ -426,7 +507,7 @@ class TransparentFileSystem(AbstractFileSystem):
         return fs.open(path, method, *args, **kwargs)
 
     def touch(self, path, *args, **kwargs):
-        self.mkdirs(str(Path(path).parent), exist_ok=True)
+        self.makedirs(str(Path(path).parent), exist_ok=True)
         return self.transparent_fs.touch(path, *args, **kwargs)
 
     def ukey(self, path: typing.Any) -> str:

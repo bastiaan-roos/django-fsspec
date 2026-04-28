@@ -109,7 +109,8 @@ class FsspecStorage(Storage):
         for unused in ("file_permissions_mode", "directory_permissions_mode"):
             if getattr(self, unused) is not None:
                 warnings.warn(
-                    f"FsspecStorage ignores {unused!r}; it is not currently implemented for any fsspec backend.",
+                    f"FsspecStorage ignores {unused!r}; it is not currently implemented "
+                    "for any fsspec backend and will be dropped in 0.2.0.",
                     DeprecationWarning,
                     stacklevel=2,
                 )
@@ -171,8 +172,8 @@ class FsspecStorage(Storage):
                 "use only 'on_collision' (allow_overwrite is deprecated)."
             )
         warnings.warn(
-            "FsspecStorage option 'allow_overwrite' is deprecated; "
-            "use on_collision='overwrite' (default) or 'rename' instead.",
+            "FsspecStorage option 'allow_overwrite' is deprecated and will be "
+            "removed in 0.2.0; use on_collision='overwrite' (default) or 'rename' instead.",
             DeprecationWarning,
             stacklevel=3,
         )
@@ -202,14 +203,17 @@ class FsspecStorage(Storage):
             raise PermissionError(f"FsspecStorage permission denied: {action} {name!r} ({key}=False)")
 
     def is_name_available(self, name, max_length=None):
-        """Defer to ``on_collision`` instead of Django's rename loop.
+        """Defer to the *effective* ``on_collision`` for ``name``.
 
-        For ``on_collision`` ∈ {``"overwrite"``, ``"raise"``} the caller's
-        chosen name should hit ``_save`` verbatim so the collision policy
-        can be enforced there. Only ``"rename"`` keeps Django's standard
-        rename-if-taken behavior.
+        For ``"overwrite"`` and ``"raise"`` the caller's chosen name should
+        hit ``_save`` verbatim so the collision policy can be enforced
+        there. Only ``"rename"`` keeps Django's standard rename-if-taken
+        behavior. The effective value is resolved per path so that a
+        sub-filesystem inside a ``NestedFileSystem`` can pick a stricter
+        policy than the top-level storage (most-restrictive-wins).
         """
-        if self.on_collision == "rename":
+        _, effective = self._resolve_effective(name)
+        if effective == "rename":
             return super().is_name_available(name, max_length=max_length)
         if max_length and len(name) > max_length:
             return False
