@@ -53,18 +53,20 @@ django-fsspec = { path = ".", editable = true, extras = ["s3"] }
 # -----------------------------------------------------------------------------
 # Dev feature: testing + linting + build tools
 # -----------------------------------------------------------------------------
-[feature.dev.pypi-dependencies]
+[feature.dev.dependencies]
 pytest = "*"
 pytest-cov = "*"
 pytest-django = "*"
 ruff = "*"
-build = "*"
 twine = "*"
 python-dotenv = "*"
 tox = "*"
 pre-commit = "*"
 
-pixi-pycharm = "0.0.11"
+pixi-pycharm = ">=0.0.10"
+
+[feature.dev.pypi-dependencies]
+build = "*"
 
 # -----------------------------------------------------------------------------
 # Environments
