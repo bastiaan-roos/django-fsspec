@@ -424,3 +424,46 @@ class TestNextedPathFileSystem(unittest.TestCase):
         fs = NestedFileSystem(mapping_no_default)
         with self.assertRaises(FileNotFoundError):
             fs.resolve_s3_target("unknown/foo.txt")
+
+    def test_unmatched_path_without_default_raises_filenotfound(self):
+        """rm/mkdir/etc on an unmatched path raise FileNotFoundError with
+        the path included — previously they raised generic ValueErrors."""
+        mapping_no_default = {
+            "only_a": {
+                "protocol": "local",
+                "auto_mkdir": True,
+                "relative_to_path": root_fs1,
+            },
+        }
+        fs = NestedFileSystem(mapping_no_default)
+        for op, args in [
+            ("rm", ("unmatched/foo.txt",)),
+            ("mkdir", ("unmatched/foo",)),
+            ("makedirs", ("unmatched/foo",)),
+            ("rmdir", ("unmatched/foo",)),
+            ("put", ("/tmp/whatever", "unmatched/foo.txt")),
+        ]:
+            with self.assertRaises(FileNotFoundError) as ctx:
+                getattr(fs, op)(*args)
+            msg = str(ctx.exception)
+            self.assertIn("unmatched", msg, f"{op}: {msg!r} should mention path")
+
+    def test_recursive_rm_at_root_walks_every_subfs(self):
+        """`rm("", recursive=True)` clears every sub-fs, not just the
+        matched/default one."""
+        fs = fsspec.filesystem("nested", path_storage_configs=nested_mapping)
+        # Drop a file in each sub-fs and the default.
+        for sub in ("a/foo.txt", "b/bar.txt", "stray.txt"):
+            with fs.open(sub, "w") as f:
+                f.write("x")
+        # Sanity: all three exist.
+        self.assertTrue(fs.exists("a/foo.txt"))
+        self.assertTrue(fs.exists("b/bar.txt"))
+        self.assertTrue(fs.exists("stray.txt"))
+
+        fs.rm("", recursive=True)
+
+        # All three sub-fs's must now be empty.
+        self.assertFalse(fs.exists("a/foo.txt"))
+        self.assertFalse(fs.exists("b/bar.txt"))
+        self.assertFalse(fs.exists("stray.txt"))

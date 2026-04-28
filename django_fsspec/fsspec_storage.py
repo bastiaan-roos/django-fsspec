@@ -220,8 +220,18 @@ class FsspecStorage(Storage):
         return True
 
     def delete(self, name):
+        """Remove ``name``.
+
+        Idempotent per Django's ``FileSystemStorage.delete`` contract:
+        deleting a path that does not exist is a no-op rather than an
+        error. The fsspec layer raises ``FileNotFoundError``; the
+        wrapper swallows it.
+        """
         self._check_permission("delete", name)
-        return self.filesystem.rm(name)
+        try:
+            return self.filesystem.rm(name)
+        except FileNotFoundError:
+            return None
 
     def exists(self, name):
         return self.filesystem.exists(name)

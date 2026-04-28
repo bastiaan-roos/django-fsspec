@@ -1,6 +1,27 @@
 CHANGELOG
 =========
 
+0.1.2 (unreleased)
+------------------
+
+Behavior alignment and error-message polish on top of ``0.1.1``.
+
+- ``FsspecStorage.delete(name)`` is now idempotent on a missing file —
+  matches Django's ``FileSystemStorage.delete`` contract. The fsspec
+  layer still raises ``FileNotFoundError``; the wrapper swallows it.
+  ``allow_delete=False`` continues to raise ``PermissionError`` as
+  before.
+- ``NestedFileSystem.rm("", recursive=True)`` walks every sub-filesystem
+  instead of clearing only the matched / default one. Resolves the
+  longstanding ``# todo: if recursive, find other fs`` in
+  ``nested_fs.py``.
+- ``NestedFileSystem`` operations on an unmatched path (no sub-fs and
+  no ``"default"``) now raise ``FileNotFoundError`` with the offending
+  path in the message, instead of generic ``ValueError``s. Affected
+  methods: ``rm``, ``mkdir``, ``makedirs``, ``rmdir``, ``put``.
+  ``rmdir("")`` keeps a more specific ``ValueError`` because removing
+  the conceptual root is a configuration mistake, not a missing file.
+
 0.1.1rc1 (2026-04-28)
 ---------------------
 

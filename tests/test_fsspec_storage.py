@@ -571,3 +571,45 @@ class TestVerifyChecksum(TestCase):
         self.assertIn("Checksum mismatch", str(ctx.exception))
         # Cleanup: object must not be left behind.
         self.assertFalse(storage.exists("x.txt"))
+
+
+class TestDeleteIdempotency(TestCase):
+    """`storage.delete(name)` must align with Django's ``FileSystemStorage``
+    contract: deleting a missing file is silent, not an error."""
+
+    def setUp(self):
+        self.tmp = test_data_dir / "delete_tests"
+        os.makedirs(self.tmp, exist_ok=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _storage(self, **opts):
+        from django_fsspec import FsspecStorage
+
+        return FsspecStorage(
+            storage_config={
+                "protocol": "file",
+                "auto_mkdir": True,
+                "relative_to_path": str(self.tmp),
+            },
+            **opts,
+        )
+
+    def test_delete_missing_file_is_silent(self):
+        storage = self._storage()
+        # Must not raise; mirrors FileSystemStorage.delete behavior.
+        self.assertIsNone(storage.delete("never_existed.txt"))
+
+    def test_delete_existing_file_then_again_is_silent(self):
+        storage = self._storage()
+        storage.save("x.txt", ContentFile(b"hi"))
+        storage.delete("x.txt")
+        self.assertFalse(storage.exists("x.txt"))
+        # Second delete must not raise.
+        storage.delete("x.txt")
+
+    def test_delete_still_honors_allow_delete(self):
+        storage = self._storage(permissions={"allow_delete": False})
+        with self.assertRaises(PermissionError):
+            storage.delete("anything.txt")

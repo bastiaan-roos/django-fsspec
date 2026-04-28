@@ -164,21 +164,21 @@ class NestedFileSystem(AbstractFileSystem):
     def mkdir(self, path, *args, **kwargs):
         fs, root_path, nested_path = self._get_filesystem(path)
         if fs is None:
-            raise ValueError("Cannot create directory")
+            raise FileNotFoundError(f"No sub-filesystem matches {path!r} in nested config")
         return fs.mkdir(nested_path, *args, **kwargs)
 
     def makedirs(self, path, exist_ok=False):
         fs, root_path, nested_path = self._get_filesystem(path)
         if fs is None:
-            raise ValueError("Cannot create directory")
+            raise FileNotFoundError(f"No sub-filesystem matches {path!r} in nested config")
         return fs.makedirs(nested_path, exist_ok=exist_ok)
 
     def rmdir(self, path, *args, **kwargs):
         if path == "":
-            raise ValueError("Cannot remove root path")
+            raise ValueError("Cannot remove root path of a NestedFileSystem")
         fs, root_path, nested_path = self._get_filesystem(path)
         if fs is None:
-            raise ValueError("Cannot remove directory in root path")
+            raise FileNotFoundError(f"No sub-filesystem matches {path!r} in nested config")
         return fs.rmdir(nested_path, *args, **kwargs)
 
     def ls(self, path, detail=True, **kwargs):
@@ -332,7 +332,7 @@ class NestedFileSystem(AbstractFileSystem):
         # todo: recursive=False?
         fs, root_path, nested_path = self._get_filesystem(rpath)
         if fs is None:
-            raise ValueError(f"Cannot put file to {rpath}")
+            raise FileNotFoundError(f"No sub-filesystem matches {rpath!r} in nested config")
         return fs.put(lpath, nested_path, *args, **kwargs)
 
     def head(self, path, *args, **kwargs):
@@ -382,13 +382,21 @@ class NestedFileSystem(AbstractFileSystem):
         return fs.rm_file(nested_path, *args, **kwargs)
 
     def rm(self, path, recursive=False, maxdepth=None):
-        if recursive:
-            # todo: if recursive, find other fs
-            pass
+        # Recursive rm at the conceptual root must walk every sub-fs;
+        # otherwise it would only clear the matched (or default) one and
+        # silently leave every other sub-fs intact.
+        if recursive and path == "":
+            for sub_fs in self.file_systems.values():
+                try:
+                    sub_fs.rm("", recursive=True, maxdepth=maxdepth)
+                except FileNotFoundError:
+                    # An empty sub-fs is fine; treat as no-op for that fs.
+                    continue
+            return
 
         fs, root_path, nested_path = self._get_filesystem(path)
         if fs is None:
-            raise ValueError("Cannot remove file or directory")
+            raise FileNotFoundError(f"No sub-filesystem matches {path!r} in nested config")
         if maxdepth is not None and root_path:
             # substract depth from maxdepth (depth of root path)
             maxdepth -= len(root_path.split("/"))
