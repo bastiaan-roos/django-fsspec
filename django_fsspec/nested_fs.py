@@ -461,12 +461,19 @@ class NestedFileSystem(AbstractFileSystem):
             tmp_size = os.path.getsize(tmp_path)
             result = fs2.put_file(tmp_path, nested_path2, **kwargs)
 
-            self._verify_after_cross_fs_copy(
-                src=(fs1, nested_path1),
-                dst=(fs2, nested_path2),
-                expected_size=tmp_size,
-                verify_checksum=verify_checksum,
-            )
+            try:
+                self._verify_after_cross_fs_copy(
+                    src=(fs1, nested_path1),
+                    dst=(fs2, nested_path2),
+                    expected_size=tmp_size,
+                    verify_checksum=verify_checksum,
+                )
+            except IOError as exc:
+                # Re-raise with the user-facing nested paths so production
+                # logs show ``'a/source.txt' → 'b/dest.txt'`` instead of the
+                # sub-fs-relative ``'source.txt' → 'dest.txt'`` (which would
+                # be ambiguous across multiple sub-fs prefixes).
+                raise IOError(f"Cross-fs cp_file {path1!r} → {path2!r}: {exc}") from exc
             return result
         finally:
             try:

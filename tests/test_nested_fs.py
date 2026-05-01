@@ -569,7 +569,12 @@ class TestCpFileCrossFsVerification(unittest.TestCase):
         try:
             with self.assertRaises(IOError) as ctx:
                 self.fs.cp_file("a/source.txt", "b/dest.txt")
-            self.assertIn("size", str(ctx.exception).lower())
+            msg = str(ctx.exception)
+            self.assertIn("size", msg.lower())
+            # Error must include the user-facing nested paths so production
+            # logs are unambiguous across sub-fs prefixes.
+            self.assertIn("a/source.txt", msg)
+            self.assertIn("b/dest.txt", msg)
         finally:
             fs2.size = original_size
 
