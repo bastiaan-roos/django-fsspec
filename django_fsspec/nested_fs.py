@@ -17,6 +17,19 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+# Files larger than this threshold are typically uploaded to S3 as multipart
+# objects, which makes the ETag a `"{md5}-{partcount}"` digest instead of the
+# plain MD5 of the bytes. That digest is not portable across backends, so a
+# raw checksum-vs-checksum comparison would always mismatch above this cut-off.
+# We conservatively skip checksum verification for files this size or larger
+# and rely on size-only verification (which is always meaningful).
+#
+# The 5 MiB value is the AWS default `multipart_threshold`; AWS CLI uses 16 MiB
+# and some tools 8 MiB. Keep this as a single constant so future tuning is
+# one edit.
+_NON_MULTIPART_LIMIT = 5 * 1024 * 1024
+
+
 class NestedFileSystem(AbstractFileSystem):
     """A fsspec filesystem that maps paths to different filesystems based on the path prefix.
 
