@@ -1426,10 +1426,10 @@ packages:
   requires_python: '>=3.12'
 - pypi: ./
   name: django-fsspec
-  version: 0.1.0b1
-  sha256: 4ab63147309da35efc8882f53129fe51e6b55bdb01dd6f97331558e844f5a6c8
+  version: 0.1.3a1
+  sha256: c4182780ebd97ad4653f93163ec8e87d7b37ae0bc7b200146efc3094b8399e9b
   requires_dist:
-  - django>=5.0
+  - django>=5.0,<7
   - fsspec>=2025.2.0
   - s3fs>=2025.2.0 ; extra == 's3'
   - boto3 ; extra == 's3'
