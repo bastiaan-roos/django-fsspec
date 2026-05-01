@@ -4,7 +4,9 @@ from pathlib import Path
 
 import fsspec
 
+from django_fsspec.nested_fs import _NON_MULTIPART_LIMIT
 from django_fsspec.nested_fs import NestedFileSystem
+from django_fsspec.nested_fs import _compare_checksums_safe
 
 test_data_dir = Path(Path(__file__).parent, "tmp")
 tmp_get_dir = Path(test_data_dir, "..", "tmp_get").resolve()
@@ -467,3 +469,65 @@ class TestNextedPathFileSystem(unittest.TestCase):
         self.assertFalse(fs.exists("a/foo.txt"))
         self.assertFalse(fs.exists("b/bar.txt"))
         self.assertFalse(fs.exists("stray.txt"))
+
+
+class TestCompareChecksumsSafe(unittest.TestCase):
+    """Verifies the graceful-skip semantics of the checksum compare helper.
+
+    The helper must:
+    - return ``True`` when both checksums are equal strings,
+    - raise ``IOError`` when both are strings but unequal,
+    - return ``True`` (skip) when either fs returns a non-string checksum
+      (e.g. local FS returns an int of size+mtime that always mismatches),
+    - return ``True`` (skip) when either ``checksum()`` raises
+      ``NotImplementedError``,
+    - return ``True`` (skip) when ``size`` is at or above
+      ``_NON_MULTIPART_LIMIT`` (multipart ETag uncertainty).
+    """
+
+    def _fake_fs(self, checksum_value):
+        """Return an object exposing a ``checksum(path)`` method."""
+
+        class _FakeFs:
+            def checksum(self, path):
+                if isinstance(checksum_value, type) and issubclass(checksum_value, BaseException):
+                    raise checksum_value("nope")
+                return checksum_value
+
+        return _FakeFs()
+
+    def test_matching_string_checksums(self):
+        result = _compare_checksums_safe(self._fake_fs("abc"), "src", self._fake_fs("abc"), "dst", size=1024)
+        self.assertTrue(result)
+
+    def test_mismatched_string_checksums_raises(self):
+        with self.assertRaises(IOError) as ctx:
+            _compare_checksums_safe(self._fake_fs("abc"), "src", self._fake_fs("xyz"), "dst", size=1024)
+        msg = str(ctx.exception)
+        self.assertIn("Checksum mismatch", msg)
+        self.assertIn("src", msg)
+        self.assertIn("dst", msg)
+
+    def test_int_checksum_skips(self):
+        # Local FS returns int(size+mtime). isinstance(str) gating must skip.
+        result = _compare_checksums_safe(self._fake_fs(123), "src", self._fake_fs("abc"), "dst", size=1024)
+        self.assertTrue(result)
+
+    def test_notimplementederror_skips(self):
+        result = _compare_checksums_safe(
+            self._fake_fs(NotImplementedError), "src", self._fake_fs("abc"), "dst", size=1024
+        )
+        self.assertTrue(result)
+
+    def test_size_at_multipart_limit_skips(self):
+        # File exactly at threshold: skip (defensive — could be multipart).
+        result = _compare_checksums_safe(
+            self._fake_fs("abc"), "src", self._fake_fs("xyz"), "dst", size=_NON_MULTIPART_LIMIT
+        )
+        self.assertTrue(result)
+
+    def test_size_above_multipart_limit_skips(self):
+        result = _compare_checksums_safe(
+            self._fake_fs("abc"), "src", self._fake_fs("xyz"), "dst", size=_NON_MULTIPART_LIMIT * 2
+        )
+        self.assertTrue(result)

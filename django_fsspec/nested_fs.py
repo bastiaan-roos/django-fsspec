@@ -30,6 +30,61 @@ if TYPE_CHECKING:
 _NON_MULTIPART_LIMIT = 5 * 1024 * 1024
 
 
+def _compare_checksums_safe(fs1, path1: str, fs2, path2: str, *, size: int) -> bool:
+    """Compare checksums of two paths across two filesystems with graceful skip.
+
+    The compare is best-effort: filesystems that cannot produce a portable
+    string checksum (local FS returns ``int(size+mtime)``; some backends
+    raise ``NotImplementedError``) are skipped rather than treated as a
+    failure, because a hard-fail would make this layer unusable for local
+    development. Files at or above ``_NON_MULTIPART_LIMIT`` are also
+    skipped: S3 multipart uploads change the ETag format
+    (``"{md5}-{partcount}"``) and the comparison would always mismatch.
+
+    Parameters
+    ----------
+    fs1, fs2 : fsspec.AbstractFileSystem
+        Source and destination filesystems.
+    path1, path2 : str
+        Paths within the respective filesystems.
+    size : int
+        Size of the file in bytes — used to gate the multipart cut-off.
+
+    Returns
+    -------
+    bool
+        ``True`` when checksums matched OR the comparison was skipped.
+
+    Raises
+    ------
+    IOError
+        When both checksums are strings (i.e. comparable) but unequal.
+        The destination is **not** removed here — the caller decides
+        cleanup, because only the caller knows whether ``path2`` was
+        freshly created by the current operation.
+    """
+    if size >= _NON_MULTIPART_LIMIT:
+        # Multipart-uploaded objects use a different ETag formula on S3;
+        # a portable comparison is not feasible, so size-check is the
+        # strongest guarantee we can offer above this threshold.
+        return True
+    try:
+        cs1 = fs1.checksum(path1)
+        cs2 = fs2.checksum(path2)
+    except NotImplementedError:
+        # Some backends do not implement checksum() at all — that is fine,
+        # we already verified size which catches the bulk of corruption.
+        return True
+    # Local FS returns int(size+mtime); two local FS roots always disagree
+    # on mtime so this would be a guaranteed false-positive. Restrict the
+    # comparison to portable string checksums.
+    if not isinstance(cs1, str) or not isinstance(cs2, str):
+        return True
+    if cs1 != cs2:
+        raise IOError(f"Checksum mismatch between {path1!r} and {path2!r}: {cs1!r} != {cs2!r}")
+    return True
+
+
 class NestedFileSystem(AbstractFileSystem):
     """A fsspec filesystem that maps paths to different filesystems based on the path prefix.
 
