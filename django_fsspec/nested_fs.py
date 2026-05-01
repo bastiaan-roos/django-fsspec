@@ -526,15 +526,52 @@ class NestedFileSystem(AbstractFileSystem):
 
     # def expand_path(self, path, recursive=False, maxdepth=None, **kwargs): uses glob, expand_path, exists
 
-    def mv(self, path1, path2, **kwargs):
+    def mv(self, path1, path2, *, verify_checksum=False, **kwargs):
+        """Move ``path1`` to ``path2`` across (possibly different) sub-fs's.
+
+        Same-fs moves are delegated to the sub-fs unchanged.
+
+        Cross-fs moves are implemented as ``cp_file`` followed by ``rm`` of
+        the source. The source ``rm`` runs only if:
+
+        1. ``cp_file`` did not raise (which already covers size-mismatch
+           and any opt-in checksum-mismatch via Task 3),
+        2. AND the destination is observably present afterwards
+           (belt-and-braces against backends that silently swallow write
+           failures and do not propagate them as exceptions).
+
+        If either condition fails the source is left intact and an
+        ``IOError`` is raised; the caller can retry.
+
+        Parameters
+        ----------
+        path1, path2 : str
+            Source and destination paths in nested notation.
+        verify_checksum : bool, optional
+            Forwarded to ``cp_file``. Default ``False``.
+        **kwargs
+            Forwarded to ``cp_file`` / ``put_file``.
+
+        Raises
+        ------
+        FileNotFoundError
+            When either side does not have a sub-fs and there is no
+            ``default``.
+        IOError
+            On any verification failure during the copy or when the
+            destination is unexpectedly absent after the copy.
+        """
         fs1, _root1, nested_path1 = self._get_filesystem(path1)
         fs2, _root2, nested_path2 = self._get_filesystem(path2)
         if fs1 is None or fs2 is None:
             raise FileNotFoundError(f"No backend filesystem for {path1} or {path2}")
         if fs1 is fs2:
             return fs1.mv(nested_path1, nested_path2, **kwargs)
-        # Cross-filesystem move: cp dan rm
-        self.cp_file(path1, path2, **kwargs)
+
+        # Cross-filesystem move: cp (with verification), confirm, then rm.
+        self.cp_file(path1, path2, verify_checksum=verify_checksum, **kwargs)
+        if not fs2.exists(nested_path2):
+            raise IOError(f"mv aborted: destination {path2!r} not present after copy; source {path1!r} preserved.")
         return fs1.rm(nested_path1)
 
     def rm_file(self, path, *args, **kwargs):

@@ -666,3 +666,72 @@ class TestCpFileCrossFsVerification(unittest.TestCase):
         finally:
             fs1.checksum = original
         self.assertEqual([], calls, "checksum() must not be called when verify_checksum=False")
+
+
+class TestMvCrossFsVerification(unittest.TestCase):
+    """Cross-fs mv must not delete the source until the destination is
+    confirmed present. The previous implementation called ``rm`` on the
+    source unconditionally after ``cp_file`` — a silently-failing copy
+    would have caused data loss.
+    """
+
+    def setUp(self):
+        self.fs = NestedFileSystem(nested_mapping)
+        with self.fs.open("a/source.txt", "w") as f:
+            f.write("inhoud om te verplaatsen")
+
+    def tearDown(self):
+        shutil.rmtree(test_data_dir, ignore_errors=True)
+
+    def test_happy_path_moves(self):
+        """Sanity: a normal cross-fs mv still works."""
+        self.fs.mv("a/source.txt", "b/dest.txt")
+        self.assertFalse(self.fs.exists("a/source.txt"))
+        self.assertTrue(self.fs.exists("b/dest.txt"))
+
+    def test_destination_missing_after_copy_preserves_source(self):
+        """If cp_file silently produced no destination, mv must not rm source.
+
+        Simulated by monkey-patching the destination sub-fs ``exists`` to
+        return False even after a successful put. In real life this would
+        be e.g. a backend that swallows write errors; we want belt-and-
+        braces against that.
+        """
+        fs2, _root, _ = self.fs._get_filesystem("b/dest.txt")
+        original_exists = fs2.exists
+
+        def _lying_exists(path, *args, **kwargs):
+            # Lie about the freshly-written file only; let real lookups pass.
+            if path.endswith("dest.txt"):
+                return False
+            return original_exists(path, *args, **kwargs)
+
+        fs2.exists = _lying_exists
+        try:
+            with self.assertRaises(IOError) as ctx:
+                self.fs.mv("a/source.txt", "b/dest.txt")
+            self.assertIn("destination", str(ctx.exception).lower())
+        finally:
+            fs2.exists = original_exists
+
+        # Source must still be there — the operation failed before rm.
+        self.assertTrue(self.fs.exists("a/source.txt"))
+
+    def test_cp_file_failure_preserves_source(self):
+        """If cp_file itself raises (e.g. size-check fails), mv must not rm source.
+
+        Regression for the original bug: previously rm ran unconditionally
+        after cp_file, even if cp_file later started raising on mismatch.
+        """
+        fs2, _root, _ = self.fs._get_filesystem("b/dest.txt")
+        original_size = fs2.size
+        fs2.size = lambda path, *a, **k: 0  # always lie → size mismatch
+
+        try:
+            with self.assertRaises(IOError):
+                self.fs.mv("a/source.txt", "b/dest.txt")
+        finally:
+            fs2.size = original_size
+
+        self.assertTrue(self.fs.exists("a/source.txt"))
+        self.assertFalse(self.fs.exists("b/dest.txt"))
