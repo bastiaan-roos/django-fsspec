@@ -611,3 +611,58 @@ class TestCpFileCrossFsVerification(unittest.TestCase):
         """
         self.fs.cp_file("a/source.txt", "a/dest.txt")
         self.assertTrue(self.fs.exists("a/dest.txt"))
+
+    def test_verify_checksum_true_with_string_match_passes(self):
+        """End-to-end: when both fs return matching string checksums, it succeeds."""
+        fs1, _, _ = self.fs._get_filesystem("a/source.txt")
+        fs2, _, _ = self.fs._get_filesystem("b/dest.txt")
+        # Force a portable string checksum on both sides.
+        fs1.checksum = lambda path, **k: "deadbeef"
+        fs2.checksum = lambda path, **k: "deadbeef"
+
+        self.fs.cp_file("a/source.txt", "b/dest.txt", verify_checksum=True)
+        self.assertTrue(self.fs.exists("b/dest.txt"))
+
+    def test_verify_checksum_true_with_string_mismatch_raises(self):
+        """End-to-end: differing string checksums raise and remove dest."""
+        fs1, _, _ = self.fs._get_filesystem("a/source.txt")
+        fs2, _, _ = self.fs._get_filesystem("b/dest.txt")
+        fs1.checksum = lambda path, **k: "deadbeef"
+        fs2.checksum = lambda path, **k: "cafef00d"
+
+        with self.assertRaises(IOError) as ctx:
+            self.fs.cp_file("a/source.txt", "b/dest.txt", verify_checksum=True)
+        self.assertIn("Checksum mismatch", str(ctx.exception))
+        # Destination removed, source intact.
+        self.assertFalse(self.fs.exists("b/dest.txt"))
+        self.assertTrue(self.fs.exists("a/source.txt"))
+
+    def test_verify_checksum_true_with_int_checksums_skips(self):
+        """Default local-FS behavior (int checksum) must not break verify_checksum.
+
+        Reason: the local FS returns ``int(size+mtime)`` which is guaranteed
+        to differ between two roots. A naive comparison would make
+        ``verify_checksum=True`` unusable for local development; the
+        graceful-skip path in ``_compare_checksums_safe`` filters out
+        non-string checksums.
+        """
+        # No monkey-patch: real local FS returns int. Should still succeed.
+        self.fs.cp_file("a/source.txt", "b/dest.txt", verify_checksum=True)
+        self.assertTrue(self.fs.exists("b/dest.txt"))
+
+    def test_verify_checksum_default_off_does_not_call_checksum(self):
+        """Without verify_checksum=True the helper must not be invoked.
+
+        Guards against a regression where someone refactors and accidentally
+        wires the checksum compare in unconditionally — we already had a
+        bug like that in the FsspecStorage layer, document the contract.
+        """
+        fs1, _, _ = self.fs._get_filesystem("a/source.txt")
+        calls = []
+        original = fs1.checksum
+        fs1.checksum = lambda path, **k: calls.append(path) or original(path, **k)
+        try:
+            self.fs.cp_file("a/source.txt", "b/dest.txt")  # default off
+        finally:
+            fs1.checksum = original
+        self.assertEqual([], calls, "checksum() must not be called when verify_checksum=False")
