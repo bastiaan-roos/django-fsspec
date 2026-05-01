@@ -531,3 +531,83 @@ class TestCompareChecksumsSafe(unittest.TestCase):
             self._fake_fs("abc"), "src", self._fake_fs("xyz"), "dst", size=_NON_MULTIPART_LIMIT * 2
         )
         self.assertTrue(result)
+
+
+class TestCpFileCrossFsVerification(unittest.TestCase):
+    """Cross-fs cp_file must verify that the destination size matches the
+    source. On mismatch the destination is removed; the source is left
+    intact. Same-fs cp_file delegates to the sub-fs and is out of scope here.
+    """
+
+    def setUp(self):
+        # Two separate local roots so cp_file takes the cross-fs branch.
+        self.fs = NestedFileSystem(nested_mapping)
+        with self.fs.open("a/source.txt", "w") as f:
+            f.write("0123456789" * 100)  # 1000 bytes
+
+    def tearDown(self):
+        shutil.rmtree(test_data_dir, ignore_errors=True)
+
+    def test_size_match_copies_successfully(self):
+        """Happy path: sizes match → copy succeeds, both files present."""
+        self.fs.cp_file("a/source.txt", "b/dest.txt")
+        self.assertTrue(self.fs.exists("a/source.txt"))
+        self.assertTrue(self.fs.exists("b/dest.txt"))
+        self.assertEqual(self.fs.size("a/source.txt"), self.fs.size("b/dest.txt"))
+
+    def test_size_mismatch_raises_and_removes_destination(self):
+        """Mismatch: destination is removed, source is preserved, IOError raised."""
+        # Get the destination sub-fs and monkey-patch its size() to lie
+        # about the written bytes — simulates a partial put.
+        fs2, _root, _ = self.fs._get_filesystem("b/dest.txt")
+        original_size = fs2.size
+
+        def _lying_size(path, *args, **kwargs):
+            return original_size(path, *args, **kwargs) - 1
+
+        fs2.size = _lying_size
+        try:
+            with self.assertRaises(IOError) as ctx:
+                self.fs.cp_file("a/source.txt", "b/dest.txt")
+            self.assertIn("size", str(ctx.exception).lower())
+        finally:
+            fs2.size = original_size
+
+        # Source intact, destination removed (per "delete the suspect, keep
+        # the original" cleanup philosophy).
+        self.assertTrue(self.fs.exists("a/source.txt"))
+        self.assertFalse(self.fs.exists("b/dest.txt"))
+
+    def test_destination_remove_failure_is_swallowed(self):
+        """When the cleanup rm itself fails, the original IOError still surfaces.
+
+        Use case: destination fs lost connectivity or permission was revoked
+        between put_file and rm. We must not mask the verification error
+        with the cleanup error.
+        """
+        fs2, _root, _ = self.fs._get_filesystem("b/dest.txt")
+        original_size = fs2.size
+        fs2.size = lambda path, *a, **k: original_size(path, *a, **k) - 1
+
+        original_rm = fs2.rm
+
+        def _broken_rm(*a, **k):
+            raise PermissionError("cleanup denied")
+
+        fs2.rm = _broken_rm
+        try:
+            with self.assertRaises(IOError):
+                self.fs.cp_file("a/source.txt", "b/dest.txt")
+        finally:
+            fs2.size = original_size
+            fs2.rm = original_rm
+
+    def test_same_fs_cp_file_unchanged(self):
+        """Same-fs path delegates to the sub-fs and bypasses verification.
+
+        Regression guard: we must not introduce verification overhead on
+        the same-fs branch, because that breaks single-fs unit tests that
+        do not configure size() to be reliable.
+        """
+        self.fs.cp_file("a/source.txt", "a/dest.txt")
+        self.assertTrue(self.fs.exists("a/dest.txt"))
