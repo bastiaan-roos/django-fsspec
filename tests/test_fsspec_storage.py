@@ -571,3 +571,73 @@ class TestVerifyChecksum(TestCase):
         self.assertIn("Checksum mismatch", str(ctx.exception))
         # Cleanup: object must not be left behind.
         self.assertFalse(storage.exists("x.txt"))
+
+
+class TestDeleteIdempotency(TestCase):
+    """`storage.delete(name)` must align with Django's ``FileSystemStorage``
+    contract: deleting a missing file is silent, not an error."""
+
+    def setUp(self):
+        self.tmp = test_data_dir / "delete_tests"
+        os.makedirs(self.tmp, exist_ok=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _storage(self, **opts):
+        from django_fsspec import FsspecStorage
+
+        return FsspecStorage(
+            storage_config={
+                "protocol": "file",
+                "auto_mkdir": True,
+                "relative_to_path": str(self.tmp),
+            },
+            **opts,
+        )
+
+    def test_delete_missing_file_is_silent(self):
+        storage = self._storage()
+        # Must not raise; mirrors FileSystemStorage.delete behavior.
+        self.assertIsNone(storage.delete("never_existed.txt"))
+
+    def test_delete_existing_file_then_again_is_silent(self):
+        storage = self._storage()
+        storage.save("x.txt", ContentFile(b"hi"))
+        storage.delete("x.txt")
+        self.assertFalse(storage.exists("x.txt"))
+        # Second delete must not raise.
+        storage.delete("x.txt")
+
+    def test_delete_still_honors_allow_delete(self):
+        storage = self._storage(permissions={"allow_delete": False})
+        with self.assertRaises(PermissionError):
+            storage.delete("anything.txt")
+
+    def test_delete_routes_trailing_slash_to_rm_file(self):
+        """S3-style directory markers (trailing slash) must use rm_file.
+
+        rm() interprets a trailing slash as a directory and lists children;
+        for an empty marker that returns without deleting the marker
+        object itself. rm_file issues delete_object on the exact key
+        (slash included), which actually removes the marker. This test
+        proves the routing decision in FsspecStorage.delete().
+        """
+        from unittest.mock import MagicMock
+
+        storage = self._storage()
+        # Vervang de echte filesystem door een mock zodat we de calls kunnen tracken.
+        fake_fs = MagicMock()
+        storage.filesystem = fake_fs
+
+        # File path → rm wordt aangeroepen, rm_file niet.
+        storage.delete("ordinary.txt")
+        fake_fs.rm.assert_called_once_with("ordinary.txt")
+        fake_fs.rm_file.assert_not_called()
+
+        fake_fs.reset_mock()
+
+        # Trailing-slash path → rm_file wordt aangeroepen, rm niet.
+        storage.delete("dir-marker/")
+        fake_fs.rm_file.assert_called_once_with("dir-marker/")
+        fake_fs.rm.assert_not_called()
