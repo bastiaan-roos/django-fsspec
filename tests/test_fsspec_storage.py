@@ -614,14 +614,10 @@ class TestDeleteIdempotency(TestCase):
         with self.assertRaises(PermissionError):
             storage.delete("anything.txt")
 
-    def test_delete_routes_trailing_slash_to_rm_file(self):
-        """S3-style directory markers (trailing slash) must use rm_file.
-
-        rm() interprets a trailing slash as a directory and lists children;
-        for an empty marker that returns without deleting the marker
-        object itself. rm_file issues delete_object on the exact key
-        (slash included), which actually removes the marker. This test
-        proves the routing decision in FsspecStorage.delete().
+    def test_delete_routes_dir_vs_file_via_isdir(self):
+        """``delete()`` consults ``isdir()`` to decide whether to pass
+        ``recursive=True`` to ``rm()``. Required for s3fs, which refuses
+        to remove a "directory" (S3 prefix) without recursion.
         """
         from unittest.mock import MagicMock
 
@@ -630,14 +626,14 @@ class TestDeleteIdempotency(TestCase):
         fake_fs = MagicMock()
         storage.filesystem = fake_fs
 
-        # File path → rm wordt aangeroepen, rm_file niet.
+        # File path (isdir=False) → rm zonder recursive.
+        fake_fs.isdir.return_value = False
         storage.delete("ordinary.txt")
         fake_fs.rm.assert_called_once_with("ordinary.txt")
-        fake_fs.rm_file.assert_not_called()
 
         fake_fs.reset_mock()
 
-        # Trailing-slash path → rm_file wordt aangeroepen, rm niet.
-        storage.delete("dir-marker/")
-        fake_fs.rm_file.assert_called_once_with("dir-marker/")
-        fake_fs.rm.assert_not_called()
+        # Directory path (isdir=True) → rm met recursive=True.
+        fake_fs.isdir.return_value = True
+        storage.delete("some/dir")
+        fake_fs.rm.assert_called_once_with("some/dir", recursive=True)
