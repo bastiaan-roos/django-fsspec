@@ -1,6 +1,29 @@
 CHANGELOG
 =========
 
+0.1.3 (unreleased)
+------------------
+
+Cross-filesystem ``cp_file`` / ``mv`` now verify the copy before reporting
+success.
+
+- ``NestedFileSystem.cp_file`` (cross-fs branch) compares the destination
+  size to the local tempfile size after upload. On mismatch the destination
+  is removed and ``IOError`` is raised; the source is untouched. Same-fs
+  copies are delegated to the sub-fs and are unchanged.
+- New keyword-only argument ``verify_checksum=False`` on ``cp_file`` and
+  ``mv``. When set to ``True`` it adds a portable-string-checksum compare
+  on top of the size check, with graceful skip for backends that do not
+  return string checksums (local FS returns ``int(size+mtime)``) or that
+  raise ``NotImplementedError``. Files at or above ``_NON_MULTIPART_LIMIT``
+  (5 MiB) skip the checksum compare because S3 multipart ETags are not
+  portable across backends.
+- ``NestedFileSystem.mv`` (cross-fs branch) now confirms the destination
+  exists after the copy before removing the source. If a backend silently
+  produced no destination the source is preserved and ``IOError`` is
+  raised — previous behavior was to ``rm`` the source unconditionally,
+  which could cause data loss.
+
 0.1.2 (unreleased)
 ------------------
 
@@ -21,6 +44,11 @@ Behavior alignment and error-message polish on top of ``0.1.1``.
   methods: ``rm``, ``mkdir``, ``makedirs``, ``rmdir``, ``put``.
   ``rmdir("")`` keeps a more specific ``ValueError`` because removing
   the conceptual root is a configuration mistake, not a missing file.
+- **Drop Django 5.0 support.** Minimum is now Django 5.1. Django 5.0 has
+  been end-of-life since April 2025, and ``FsspecStorage`` relies on the
+  ``is_name_available`` / ``allow_overwrite`` ``Storage`` API that was
+  introduced in Django 5.1 to enforce ``on_collision`` policies.
+
 
 0.1.1rc1 (2026-04-28)
 ---------------------

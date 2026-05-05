@@ -17,6 +17,74 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+# Files larger than this threshold are typically uploaded to S3 as multipart
+# objects, which makes the ETag a `"{md5}-{partcount}"` digest instead of the
+# plain MD5 of the bytes. That digest is not portable across backends, so a
+# raw checksum-vs-checksum comparison would always mismatch above this cut-off.
+# We conservatively skip checksum verification for files this size or larger
+# and rely on size-only verification (which is always meaningful).
+#
+# The 5 MiB value is the AWS default `multipart_threshold`; AWS CLI uses 16 MiB
+# and some tools 8 MiB. Keep this as a single constant so future tuning is
+# one edit.
+_NON_MULTIPART_LIMIT = 5 * 1024 * 1024
+
+
+def _compare_checksums_safe(fs1, path1: str, fs2, path2: str, *, size: int) -> bool:
+    """Compare checksums of two paths across two filesystems with graceful skip.
+
+    The compare is best-effort: filesystems that cannot produce a portable
+    string checksum (local FS returns ``int(size+mtime)``; some backends
+    raise ``NotImplementedError``) are skipped rather than treated as a
+    failure, because a hard-fail would make this layer unusable for local
+    development. Files at or above ``_NON_MULTIPART_LIMIT`` are also
+    skipped: S3 multipart uploads change the ETag format
+    (``"{md5}-{partcount}"``) and the comparison would always mismatch.
+
+    Parameters
+    ----------
+    fs1, fs2 : fsspec.AbstractFileSystem
+        Source and destination filesystems.
+    path1, path2 : str
+        Paths within the respective filesystems.
+    size : int
+        Size of the file in bytes — used to gate the multipart cut-off.
+
+    Returns
+    -------
+    bool
+        ``True`` when checksums matched OR the comparison was skipped.
+
+    Raises
+    ------
+    IOError
+        When both checksums are strings (i.e. comparable) but unequal.
+        The destination is **not** removed here — the caller decides
+        cleanup, because only the caller knows whether ``path2`` was
+        freshly created by the current operation.
+    """
+    if size >= _NON_MULTIPART_LIMIT:
+        # Multipart-uploaded objects use a different ETag formula on S3;
+        # a portable comparison is not feasible, so size-check is the
+        # strongest guarantee we can offer above this threshold.
+        return True
+    try:
+        cs1 = fs1.checksum(path1)
+        cs2 = fs2.checksum(path2)
+    except NotImplementedError:
+        # Some backends do not implement checksum() at all — that is fine,
+        # we already verified size which catches the bulk of corruption.
+        return True
+    # Local FS returns int(size+mtime); two local FS roots always disagree
+    # on mtime so this would be a guaranteed false-positive. Restrict the
+    # comparison to portable string checksums.
+    if not isinstance(cs1, str) or not isinstance(cs2, str):
+        return True
+    if cs1 != cs2:
+        raise IOError(f"Checksum mismatch between {path1!r} and {path2!r}: {cs1!r} != {cs2!r}")
+    return True
+
+
 class NestedFileSystem(AbstractFileSystem):
     """A fsspec filesystem that maps paths to different filesystems based on the path prefix.
 
@@ -343,38 +411,174 @@ class NestedFileSystem(AbstractFileSystem):
         fs, root_path, nested_path = self._get_filesystem(path)
         return fs.tail(nested_path, *args, **kwargs)
 
-    def cp_file(self, path1, path2, **kwargs):
+    def cp_file(self, path1, path2, *, verify_checksum=False, **kwargs):
+        """Copy ``path1`` to ``path2`` across (possibly different) sub-fs's.
+
+        Same-fs copies are delegated to the sub-fs unchanged.
+
+        Cross-fs copies stream through a local tempfile and are verified:
+
+        - **Size-check (always on):** the destination size must equal the
+          source size after upload. On mismatch the destination is removed
+          and ``IOError`` is raised. The source is never touched.
+        - **Checksum-check (opt-in via ``verify_checksum=True``):** in
+          addition to the size-check, compares
+          ``fs1.checksum(path1)`` against ``fs2.checksum(path2)`` with
+          graceful skip for backends that do not return a portable string
+          checksum or for files at/above ``_NON_MULTIPART_LIMIT``.
+
+        Parameters
+        ----------
+        path1, path2 : str
+            Source and destination paths in nested notation.
+        verify_checksum : bool, optional
+            Default ``False``. When ``True``, perform an additional checksum
+            comparison after the size-check.
+        **kwargs
+            Forwarded to the underlying ``put_file`` call.
+
+        Raises
+        ------
+        FileNotFoundError
+            When either side does not have a sub-fs and there is no
+            ``default``.
+        IOError
+            On size or checksum mismatch after copy. The destination is
+            removed; the source is preserved.
+        """
         fs1, _root1, nested_path1 = self._get_filesystem(path1)
         fs2, _root2, nested_path2 = self._get_filesystem(path2)
         if fs1 is None or fs2 is None:
             raise FileNotFoundError(f"No backend filesystem for {path1} or {path2}")
         if fs1 is fs2:
             return fs1.cp_file(nested_path1, nested_path2, **kwargs)
+
         # Cross-filesystem copy: stream via a temporary local path.
         with tempfile.NamedTemporaryFile(delete=False) as tmp:
             tmp_path = tmp.name
         try:
             fs1.get_file(nested_path1, tmp_path)
-            return fs2.put_file(tmp_path, nested_path2, **kwargs)
+            tmp_size = os.path.getsize(tmp_path)
+            result = fs2.put_file(tmp_path, nested_path2, **kwargs)
+
+            try:
+                self._verify_after_cross_fs_copy(
+                    src=(fs1, nested_path1),
+                    dst=(fs2, nested_path2),
+                    expected_size=tmp_size,
+                    verify_checksum=verify_checksum,
+                )
+            except IOError as exc:
+                # Re-raise with the user-facing nested paths so production
+                # logs show ``'a/source.txt' → 'b/dest.txt'`` instead of the
+                # sub-fs-relative ``'source.txt' → 'dest.txt'`` (which would
+                # be ambiguous across multiple sub-fs prefixes).
+                raise IOError(f"Cross-fs cp_file {path1!r} → {path2!r}: {exc}") from exc
+            return result
         finally:
             try:
                 os.remove(tmp_path)
             except OSError:
                 pass
 
+    def _verify_after_cross_fs_copy(self, *, src, dst, expected_size, verify_checksum):
+        """Verify a freshly-written cross-fs destination; clean up on failure.
+
+        Always size-checks; optionally checksum-checks. On any mismatch the
+        destination is removed (best-effort — a failed cleanup does not
+        mask the original mismatch error) and the verification error is
+        re-raised. The source is never touched here.
+
+        Parameters
+        ----------
+        src : tuple[fsspec.AbstractFileSystem, str]
+            ``(source_fs, source_path)`` within the source filesystem.
+        dst : tuple[fsspec.AbstractFileSystem, str]
+            ``(dest_fs, dest_path)`` within the destination filesystem.
+        expected_size : int
+            Authoritative byte count taken from the local tempfile after
+            ``get_file``.
+        verify_checksum : bool
+            When ``True`` and the file is below ``_NON_MULTIPART_LIMIT``,
+            also compare portable string checksums with graceful skip.
+        """
+        fs1, path1 = src
+        fs2, path2 = dst
+        try:
+            actual_size = fs2.size(path2)
+            if actual_size != expected_size:
+                raise IOError(
+                    f"Size mismatch after copy of {path1!r} → {path2!r}: "
+                    f"expected {expected_size} bytes, got {actual_size}."
+                )
+            if verify_checksum:
+                _compare_checksums_safe(
+                    fs1,
+                    path1,
+                    fs2,
+                    path2,
+                    size=expected_size,
+                )
+        except IOError:
+            # Cleanup the suspect destination; the source is intact.
+            # Swallow cleanup errors so we do not mask the verification
+            # error itself.
+            try:
+                fs2.rm(path2)
+            except Exception:
+                pass
+            raise
+
     # def copy(self, path1, path2, **kwargs): uses cp_file, isdir, expand_path
 
     # def expand_path(self, path, recursive=False, maxdepth=None, **kwargs): uses glob, expand_path, exists
 
-    def mv(self, path1, path2, **kwargs):
+    def mv(self, path1, path2, *, verify_checksum=False, **kwargs):
+        """Move ``path1`` to ``path2`` across (possibly different) sub-fs's.
+
+        Same-fs moves are delegated to the sub-fs unchanged.
+
+        Cross-fs moves are implemented as ``cp_file`` followed by ``rm`` of
+        the source. The source ``rm`` runs only if:
+
+        1. ``cp_file`` did not raise (which already covers size-mismatch
+           and any opt-in checksum-mismatch via Task 3),
+        2. AND the destination is observably present afterwards
+           (belt-and-braces against backends that silently swallow write
+           failures and do not propagate them as exceptions).
+
+        If either condition fails the source is left intact and an
+        ``IOError`` is raised; the caller can retry.
+
+        Parameters
+        ----------
+        path1, path2 : str
+            Source and destination paths in nested notation.
+        verify_checksum : bool, optional
+            Forwarded to ``cp_file``. Default ``False``.
+        **kwargs
+            Forwarded to ``cp_file`` / ``put_file``.
+
+        Raises
+        ------
+        FileNotFoundError
+            When either side does not have a sub-fs and there is no
+            ``default``.
+        IOError
+            On any verification failure during the copy or when the
+            destination is unexpectedly absent after the copy.
+        """
         fs1, _root1, nested_path1 = self._get_filesystem(path1)
         fs2, _root2, nested_path2 = self._get_filesystem(path2)
         if fs1 is None or fs2 is None:
             raise FileNotFoundError(f"No backend filesystem for {path1} or {path2}")
         if fs1 is fs2:
             return fs1.mv(nested_path1, nested_path2, **kwargs)
-        # Cross-filesystem move: cp dan rm
-        self.cp_file(path1, path2, **kwargs)
+
+        # Cross-filesystem move: cp (with verification), confirm, then rm.
+        self.cp_file(path1, path2, verify_checksum=verify_checksum, **kwargs)
+        if not fs2.exists(nested_path2):
+            raise IOError(f"mv aborted: destination {path2!r} not present after copy; source {path1!r} preserved.")
         return fs1.rm(nested_path1)
 
     def rm_file(self, path, *args, **kwargs):
