@@ -49,6 +49,7 @@ Behavior alignment and error-message polish on top of ``0.1.1``.
   ``is_name_available`` / ``allow_overwrite`` ``Storage`` API that was
   introduced in Django 5.1 to enforce ``on_collision`` policies.
 
+
 0.1.1rc1 (2026-04-28)
 ---------------------
 
