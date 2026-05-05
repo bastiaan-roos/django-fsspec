@@ -1427,9 +1427,9 @@ packages:
 - pypi: ./
   name: django-fsspec
   version: 0.1.3b1
-  sha256: c4db972d88e4c2c7a859f884a57d92a7a0a0d0c1e6ec908d51307477fd6e61e3
+  sha256: a859aa531edacaa3f75bf7a57dba3c1c606dbde4e4e69ca82c8bfeaf4d77d369
   requires_dist:
-  - django>=5.0,<7
+  - django>=5.1,<7
   - fsspec>=2026.4.0
   - s3fs>=2026.4.0 ; extra == 's3'
   - boto3 ; extra == 's3'
