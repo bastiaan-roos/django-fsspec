@@ -613,3 +613,27 @@ class TestDeleteIdempotency(TestCase):
         storage = self._storage(permissions={"allow_delete": False})
         with self.assertRaises(PermissionError):
             storage.delete("anything.txt")
+
+    def test_delete_routes_dir_vs_file_via_isdir(self):
+        """``delete()`` consults ``isdir()`` to decide whether to pass
+        ``recursive=True`` to ``rm()``. Required for s3fs, which refuses
+        to remove a "directory" (S3 prefix) without recursion.
+        """
+        from unittest.mock import MagicMock
+
+        storage = self._storage()
+        # Vervang de echte filesystem door een mock zodat we de calls kunnen tracken.
+        fake_fs = MagicMock()
+        storage.filesystem = fake_fs
+
+        # File path (isdir=False) → rm zonder recursive.
+        fake_fs.isdir.return_value = False
+        storage.delete("ordinary.txt")
+        fake_fs.rm.assert_called_once_with("ordinary.txt")
+
+        fake_fs.reset_mock()
+
+        # Directory path (isdir=True) → rm met recursive=True.
+        fake_fs.isdir.return_value = True
+        storage.delete("some/dir")
+        fake_fs.rm.assert_called_once_with("some/dir", recursive=True)

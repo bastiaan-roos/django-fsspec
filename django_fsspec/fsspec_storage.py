@@ -226,9 +226,13 @@ class FsspecStorage(Storage):
         deleting a path that does not exist is a no-op rather than an
         error. The fsspec layer raises ``FileNotFoundError``; the
         wrapper swallows it.
+
+        rm needs 'recursive=True' for directories to work on s3fs.
         """
         self._check_permission("delete", name)
         try:
+            if self.filesystem.isdir(name):
+                return self.filesystem.rm(name, recursive=True)
             return self.filesystem.rm(name)
         except FileNotFoundError:
             return None

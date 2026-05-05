@@ -44,6 +44,10 @@ Behavior alignment and error-message polish on top of ``0.1.1``.
   methods: ``rm``, ``mkdir``, ``makedirs``, ``rmdir``, ``put``.
   ``rmdir("")`` keeps a more specific ``ValueError`` because removing
   the conceptual root is a configuration mistake, not a missing file.
+- **Drop Django 5.0 support.** Minimum is now Django 5.1. Django 5.0 has
+  been end-of-life since April 2025, and ``FsspecStorage`` relies on the
+  ``is_name_available`` / ``allow_overwrite`` ``Storage`` API that was
+  introduced in Django 5.1 to enforce ``on_collision`` policies.
 
 0.1.1rc1 (2026-04-28)
 ---------------------
