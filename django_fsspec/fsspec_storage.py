@@ -228,7 +228,6 @@ class FsspecStorage(Storage):
         wrapper swallows it.
 
         rm needs 'recursive=True' for directories to work on s3fs.
-
         """
         self._check_permission("delete", name)
         try:

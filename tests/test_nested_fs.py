@@ -4,7 +4,9 @@ from pathlib import Path
 
 import fsspec
 
+from django_fsspec.nested_fs import _NON_MULTIPART_LIMIT
 from django_fsspec.nested_fs import NestedFileSystem
+from django_fsspec.nested_fs import _compare_checksums_safe
 
 test_data_dir = Path(Path(__file__).parent, "tmp")
 tmp_get_dir = Path(test_data_dir, "..", "tmp_get").resolve()
@@ -424,3 +426,317 @@ class TestNextedPathFileSystem(unittest.TestCase):
         fs = NestedFileSystem(mapping_no_default)
         with self.assertRaises(FileNotFoundError):
             fs.resolve_s3_target("unknown/foo.txt")
+
+    def test_unmatched_path_without_default_raises_filenotfound(self):
+        """rm/mkdir/etc on an unmatched path raise FileNotFoundError with
+        the path included — previously they raised generic ValueErrors."""
+        mapping_no_default = {
+            "only_a": {
+                "protocol": "local",
+                "auto_mkdir": True,
+                "relative_to_path": root_fs1,
+            },
+        }
+        fs = NestedFileSystem(mapping_no_default)
+        for op, args in [
+            ("rm", ("unmatched/foo.txt",)),
+            ("mkdir", ("unmatched/foo",)),
+            ("makedirs", ("unmatched/foo",)),
+            ("rmdir", ("unmatched/foo",)),
+            ("put", ("/tmp/whatever", "unmatched/foo.txt")),
+        ]:
+            with self.assertRaises(FileNotFoundError) as ctx:
+                getattr(fs, op)(*args)
+            msg = str(ctx.exception)
+            self.assertIn("unmatched", msg, f"{op}: {msg!r} should mention path")
+
+    def test_recursive_rm_at_root_walks_every_subfs(self):
+        """`rm("", recursive=True)` clears every sub-fs, not just the
+        matched/default one."""
+        fs = fsspec.filesystem("nested", path_storage_configs=nested_mapping)
+        # Drop a file in each sub-fs and the default.
+        for sub in ("a/foo.txt", "b/bar.txt", "stray.txt"):
+            with fs.open(sub, "w") as f:
+                f.write("x")
+        # Sanity: all three exist.
+        self.assertTrue(fs.exists("a/foo.txt"))
+        self.assertTrue(fs.exists("b/bar.txt"))
+        self.assertTrue(fs.exists("stray.txt"))
+
+        fs.rm("", recursive=True)
+
+        # All three sub-fs's must now be empty.
+        self.assertFalse(fs.exists("a/foo.txt"))
+        self.assertFalse(fs.exists("b/bar.txt"))
+        self.assertFalse(fs.exists("stray.txt"))
+
+
+class TestCompareChecksumsSafe(unittest.TestCase):
+    """Verifies the graceful-skip semantics of the checksum compare helper.
+
+    The helper must:
+    - return ``True`` when both checksums are equal strings,
+    - raise ``IOError`` when both are strings but unequal,
+    - return ``True`` (skip) when either fs returns a non-string checksum
+      (e.g. local FS returns an int of size+mtime that always mismatches),
+    - return ``True`` (skip) when either ``checksum()`` raises
+      ``NotImplementedError``,
+    - return ``True`` (skip) when ``size`` is at or above
+      ``_NON_MULTIPART_LIMIT`` (multipart ETag uncertainty).
+    """
+
+    def _fake_fs(self, checksum_value):
+        """Return an object exposing a ``checksum(path)`` method."""
+
+        class _FakeFs:
+            def checksum(self, path):
+                if isinstance(checksum_value, type) and issubclass(checksum_value, BaseException):
+                    raise checksum_value("nope")
+                return checksum_value
+
+        return _FakeFs()
+
+    def test_matching_string_checksums(self):
+        result = _compare_checksums_safe(self._fake_fs("abc"), "src", self._fake_fs("abc"), "dst", size=1024)
+        self.assertTrue(result)
+
+    def test_mismatched_string_checksums_raises(self):
+        with self.assertRaises(IOError) as ctx:
+            _compare_checksums_safe(self._fake_fs("abc"), "src", self._fake_fs("xyz"), "dst", size=1024)
+        msg = str(ctx.exception)
+        self.assertIn("Checksum mismatch", msg)
+        self.assertIn("src", msg)
+        self.assertIn("dst", msg)
+
+    def test_int_checksum_skips(self):
+        # Local FS returns int(size+mtime). isinstance(str) gating must skip.
+        result = _compare_checksums_safe(self._fake_fs(123), "src", self._fake_fs("abc"), "dst", size=1024)
+        self.assertTrue(result)
+
+    def test_notimplementederror_skips(self):
+        result = _compare_checksums_safe(
+            self._fake_fs(NotImplementedError), "src", self._fake_fs("abc"), "dst", size=1024
+        )
+        self.assertTrue(result)
+
+    def test_size_at_multipart_limit_skips(self):
+        # File exactly at threshold: skip (defensive — could be multipart).
+        result = _compare_checksums_safe(
+            self._fake_fs("abc"), "src", self._fake_fs("xyz"), "dst", size=_NON_MULTIPART_LIMIT
+        )
+        self.assertTrue(result)
+
+    def test_size_above_multipart_limit_skips(self):
+        result = _compare_checksums_safe(
+            self._fake_fs("abc"), "src", self._fake_fs("xyz"), "dst", size=_NON_MULTIPART_LIMIT * 2
+        )
+        self.assertTrue(result)
+
+
+class TestCpFileCrossFsVerification(unittest.TestCase):
+    """Cross-fs cp_file must verify that the destination size matches the
+    source. On mismatch the destination is removed; the source is left
+    intact. Same-fs cp_file delegates to the sub-fs and is out of scope here.
+    """
+
+    def setUp(self):
+        # Two separate local roots so cp_file takes the cross-fs branch.
+        self.fs = NestedFileSystem(nested_mapping)
+        with self.fs.open("a/source.txt", "w") as f:
+            f.write("0123456789" * 100)  # 1000 bytes
+
+    def tearDown(self):
+        shutil.rmtree(test_data_dir, ignore_errors=True)
+
+    def test_size_match_copies_successfully(self):
+        """Happy path: sizes match → copy succeeds, both files present."""
+        self.fs.cp_file("a/source.txt", "b/dest.txt")
+        self.assertTrue(self.fs.exists("a/source.txt"))
+        self.assertTrue(self.fs.exists("b/dest.txt"))
+        self.assertEqual(self.fs.size("a/source.txt"), self.fs.size("b/dest.txt"))
+
+    def test_size_mismatch_raises_and_removes_destination(self):
+        """Mismatch: destination is removed, source is preserved, IOError raised."""
+        # Get the destination sub-fs and monkey-patch its size() to lie
+        # about the written bytes — simulates a partial put.
+        fs2, _root, _ = self.fs._get_filesystem("b/dest.txt")
+        original_size = fs2.size
+
+        def _lying_size(path, *args, **kwargs):
+            return original_size(path, *args, **kwargs) - 1
+
+        fs2.size = _lying_size
+        try:
+            with self.assertRaises(IOError) as ctx:
+                self.fs.cp_file("a/source.txt", "b/dest.txt")
+            msg = str(ctx.exception)
+            self.assertIn("size", msg.lower())
+            # Error must include the user-facing nested paths so production
+            # logs are unambiguous across sub-fs prefixes.
+            self.assertIn("a/source.txt", msg)
+            self.assertIn("b/dest.txt", msg)
+        finally:
+            fs2.size = original_size
+
+        # Source intact, destination removed (per "delete the suspect, keep
+        # the original" cleanup philosophy).
+        self.assertTrue(self.fs.exists("a/source.txt"))
+        self.assertFalse(self.fs.exists("b/dest.txt"))
+
+    def test_destination_remove_failure_is_swallowed(self):
+        """When the cleanup rm itself fails, the original IOError still surfaces.
+
+        Use case: destination fs lost connectivity or permission was revoked
+        between put_file and rm. We must not mask the verification error
+        with the cleanup error.
+        """
+        fs2, _root, _ = self.fs._get_filesystem("b/dest.txt")
+        original_size = fs2.size
+        fs2.size = lambda path, *a, **k: original_size(path, *a, **k) - 1
+
+        original_rm = fs2.rm
+
+        def _broken_rm(*a, **k):
+            raise PermissionError("cleanup denied")
+
+        fs2.rm = _broken_rm
+        try:
+            with self.assertRaises(IOError):
+                self.fs.cp_file("a/source.txt", "b/dest.txt")
+        finally:
+            fs2.size = original_size
+            fs2.rm = original_rm
+
+    def test_same_fs_cp_file_unchanged(self):
+        """Same-fs path delegates to the sub-fs and bypasses verification.
+
+        Regression guard: we must not introduce verification overhead on
+        the same-fs branch, because that breaks single-fs unit tests that
+        do not configure size() to be reliable.
+        """
+        self.fs.cp_file("a/source.txt", "a/dest.txt")
+        self.assertTrue(self.fs.exists("a/dest.txt"))
+
+    def test_verify_checksum_true_with_string_match_passes(self):
+        """End-to-end: when both fs return matching string checksums, it succeeds."""
+        fs1, _, _ = self.fs._get_filesystem("a/source.txt")
+        fs2, _, _ = self.fs._get_filesystem("b/dest.txt")
+        # Force a portable string checksum on both sides.
+        fs1.checksum = lambda path, **k: "deadbeef"
+        fs2.checksum = lambda path, **k: "deadbeef"
+
+        self.fs.cp_file("a/source.txt", "b/dest.txt", verify_checksum=True)
+        self.assertTrue(self.fs.exists("b/dest.txt"))
+
+    def test_verify_checksum_true_with_string_mismatch_raises(self):
+        """End-to-end: differing string checksums raise and remove dest."""
+        fs1, _, _ = self.fs._get_filesystem("a/source.txt")
+        fs2, _, _ = self.fs._get_filesystem("b/dest.txt")
+        fs1.checksum = lambda path, **k: "deadbeef"
+        fs2.checksum = lambda path, **k: "cafef00d"
+
+        with self.assertRaises(IOError) as ctx:
+            self.fs.cp_file("a/source.txt", "b/dest.txt", verify_checksum=True)
+        self.assertIn("Checksum mismatch", str(ctx.exception))
+        # Destination removed, source intact.
+        self.assertFalse(self.fs.exists("b/dest.txt"))
+        self.assertTrue(self.fs.exists("a/source.txt"))
+
+    def test_verify_checksum_true_with_int_checksums_skips(self):
+        """Default local-FS behavior (int checksum) must not break verify_checksum.
+
+        Reason: the local FS returns ``int(size+mtime)`` which is guaranteed
+        to differ between two roots. A naive comparison would make
+        ``verify_checksum=True`` unusable for local development; the
+        graceful-skip path in ``_compare_checksums_safe`` filters out
+        non-string checksums.
+        """
+        # No monkey-patch: real local FS returns int. Should still succeed.
+        self.fs.cp_file("a/source.txt", "b/dest.txt", verify_checksum=True)
+        self.assertTrue(self.fs.exists("b/dest.txt"))
+
+    def test_verify_checksum_default_off_does_not_call_checksum(self):
+        """Without verify_checksum=True the helper must not be invoked.
+
+        Guards against a regression where someone refactors and accidentally
+        wires the checksum compare in unconditionally — we already had a
+        bug like that in the FsspecStorage layer, document the contract.
+        """
+        fs1, _, _ = self.fs._get_filesystem("a/source.txt")
+        calls = []
+        original = fs1.checksum
+        fs1.checksum = lambda path, **k: calls.append(path) or original(path, **k)
+        try:
+            self.fs.cp_file("a/source.txt", "b/dest.txt")  # default off
+        finally:
+            fs1.checksum = original
+        self.assertEqual([], calls, "checksum() must not be called when verify_checksum=False")
+
+
+class TestMvCrossFsVerification(unittest.TestCase):
+    """Cross-fs mv must not delete the source until the destination is
+    confirmed present. The previous implementation called ``rm`` on the
+    source unconditionally after ``cp_file`` — a silently-failing copy
+    would have caused data loss.
+    """
+
+    def setUp(self):
+        self.fs = NestedFileSystem(nested_mapping)
+        with self.fs.open("a/source.txt", "w") as f:
+            f.write("inhoud om te verplaatsen")
+
+    def tearDown(self):
+        shutil.rmtree(test_data_dir, ignore_errors=True)
+
+    def test_happy_path_moves(self):
+        """Sanity: a normal cross-fs mv still works."""
+        self.fs.mv("a/source.txt", "b/dest.txt")
+        self.assertFalse(self.fs.exists("a/source.txt"))
+        self.assertTrue(self.fs.exists("b/dest.txt"))
+
+    def test_destination_missing_after_copy_preserves_source(self):
+        """If cp_file silently produced no destination, mv must not rm source.
+
+        Simulated by monkey-patching the destination sub-fs ``exists`` to
+        return False even after a successful put. In real life this would
+        be e.g. a backend that swallows write errors; we want belt-and-
+        braces against that.
+        """
+        fs2, _root, _ = self.fs._get_filesystem("b/dest.txt")
+        original_exists = fs2.exists
+
+        def _lying_exists(path, *args, **kwargs):
+            # Lie about the freshly-written file only; let real lookups pass.
+            if path.endswith("dest.txt"):
+                return False
+            return original_exists(path, *args, **kwargs)
+
+        fs2.exists = _lying_exists
+        try:
+            with self.assertRaises(IOError) as ctx:
+                self.fs.mv("a/source.txt", "b/dest.txt")
+            self.assertIn("destination", str(ctx.exception).lower())
+        finally:
+            fs2.exists = original_exists
+
+        # Source must still be there — the operation failed before rm.
+        self.assertTrue(self.fs.exists("a/source.txt"))
+
+    def test_cp_file_failure_preserves_source(self):
+        """If cp_file itself raises (e.g. size-check fails), mv must not rm source.
+
+        Regression for the original bug: previously rm ran unconditionally
+        after cp_file, even if cp_file later started raising on mismatch.
+        """
+        fs2, _root, _ = self.fs._get_filesystem("b/dest.txt")
+        original_size = fs2.size
+        fs2.size = lambda path, *a, **k: 0  # always lie → size mismatch
+
+        try:
+            with self.assertRaises(IOError):
+                self.fs.mv("a/source.txt", "b/dest.txt")
+        finally:
+            fs2.size = original_size
+
+        self.assertTrue(self.fs.exists("a/source.txt"))
+        self.assertFalse(self.fs.exists("b/dest.txt"))
